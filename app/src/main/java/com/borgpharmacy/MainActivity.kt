@@ -1,0 +1,1019 @@
+package com.borgpharmacy
+
+import android.Manifest
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.graphics.pdf.PdfDocument
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+import android.view.View
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.compose.runtime.Composable
+import androidx.core.content.res.ResourcesCompat
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import com.borgpharmacy.domain.Company
+import com.borgpharmacy.domain.Representative
+import com.borgpharmacy.domain.Shift
+import com.borgpharmacy.domain.Visit
+import com.borgpharmacy.domain.borgArabicName
+import com.borgpharmacy.print.PassPrintManager
+import com.borgpharmacy.ui.BorgAppViewModel
+import com.borgpharmacy.ui.BorgUiState
+import com.borgpharmacy.ui.BorgViewModelFactory
+import com.borgpharmacy.ui.screens.BorgApp
+import com.borgpharmacy.ui.theme.BorgPharmacyTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.time.LocalDate
+import java.util.Date
+import java.util.Locale
+
+class MainActivity : ComponentActivity() {
+    private val viewModel: BorgAppViewModel by viewModels {
+        BorgViewModelFactory((application as BorgPharmacyApplication).container)
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        requestBackupStorageAccess()
+        setContent { RootContent() }
+    }
+
+    @Composable
+    private fun RootContent() {
+        val state by viewModel.state.collectAsStateWithLifecycle()
+        val container = (application as BorgPharmacyApplication).container
+        val printer = PassPrintManager(this)
+
+        val csvLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+            uri ?: return@rememberLauncherForActivityResult
+            val csv = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
+            viewModel.importCompaniesCsv(csv)
+        }
+        val restoreLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
+            uri ?: return@rememberLauncherForActivityResult
+            lifecycleScope.launch {
+                container.backupService.restoreDatabaseFrom(uri)
+                restartApplication()
+            }
+        }
+
+        BorgPharmacyTheme {
+            BorgApp(
+                state = state,
+                onLogin = viewModel::login,
+                onChangeForcedPasscode = viewModel::changeForcedPasscode,
+                onLogout = viewModel::logout,
+                onAddCompany = viewModel::addCompany,
+                onImportCsv = { csvLauncher.launch("text/*") },
+                onExportCompanies = { format -> exportCompanies(format, state.companies) },
+                onExportSchedules = { format -> exportSchedules(format, state) },
+                onExportMonthlyReport = { from, to, format -> exportMonthlyReport(format, from, to, state) },
+                onUpdateCompanyName = viewModel::updateCompanyName,
+                onDeleteCompany = viewModel::deleteCompany,
+                onDeleteAllCompanies = viewModel::deleteAllCompanies,
+                onAddRepresentative = viewModel::addRepresentative,
+                onMoveRepresentative = viewModel::moveRepresentative,
+                onDeleteRepresentative = viewModel::deleteRepresentative,
+                onCreateUser = viewModel::createUser,
+                onSaveBotSettings = viewModel::saveBotSettings,
+                onRefreshBotData = viewModel::refreshBotSettings,
+                onRefreshRepresentativeInquiries = viewModel::refreshRepresentativeInquiries,
+                onMarkVisitStatus = viewModel::markVisitStatus,
+                onShareToday = { shareTodayStories(state) },
+                onPrint = { company: Company, rep: Representative, visit: Visit ->
+                    // عداد الطباعة وتأكيد حضور المندوب يتمان فور الضغط على زر الطباعة.
+                    viewModel.recordPrint(rep.id, visit.id)
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        printer.printPass(company, rep, visit)
+                    }
+                },
+                onWhatsApp = { company: Company, rep: Representative ->
+                    container.whatsAppMessenger.openItinerary(
+                        company = company,
+                        representative = rep,
+                        visits = state.visitsByCompany[company.id].orEmpty()
+                            .filter { it.cycleStartEpochDay == state.cycleInfo.currentCycleStart.toEpochDay() },
+                    )
+                },
+                onBackup = viewModel::backupNow,
+                onRestore = { restoreLauncher.launch("*/*") },
+                onDriveBackup = ::shareLatestBackupToDrive,
+                onSync = viewModel::syncNow,
+                onDismissMessage = viewModel::clearSnackbar,
+            )
+        }
+    }
+
+    private fun shareTodayStories(state: BorgUiState) {
+        val currentEpoch = state.cycleInfo.currentCycleStart.toEpochDay()
+        val today = state.cycleInfo.today
+        val companies = state.companies.associateBy { it.id }
+        val todayVisits = state.visits.filter { it.cycleStartEpochDay == currentEpoch && it.date == today }
+        val morning = todayVisits.filter { it.shift == Shift.MORNING }.scheduleDisplaySorted().mapNotNull { companies[it.companyId]?.name }
+        val evening = todayVisits.filter { it.shift == Shift.EVENING }.scheduleDisplaySorted().mapNotNull { companies[it.companyId]?.name }
+
+        val shareDir = File(cacheDir, "story_shares").apply { mkdirs() }
+        val morningFile = File(shareDir, "borg_morning_story.png")
+        val eveningFile = File(shareDir, "borg_evening_story.png")
+        createStoryBitmap(
+            dateText = today.dayOfWeek.borgArabicName() + " - " + today.toString(),
+            weekText = "الأسبوع ${state.cycleInfo.weekOfCycle}",
+            shiftTitle = "الفترة الصباحية",
+            shiftIcon = "☀️",
+            companies = morning,
+            accent = Color.rgb(14, 101, 168),
+            soft = Color.rgb(234, 244, 255),
+            file = morningFile,
+        )
+        createStoryBitmap(
+            dateText = today.dayOfWeek.borgArabicName() + " - " + today.toString(),
+            weekText = "الأسبوع ${state.cycleInfo.weekOfCycle}",
+            shiftTitle = "الفترة المسائية",
+            shiftIcon = "🌙",
+            companies = evening,
+            accent = Color.rgb(200, 23, 69),
+            soft = Color.rgb(255, 240, 245),
+            file = eveningFile,
+        )
+        val uris = arrayListOf(
+            (application as BorgPharmacyApplication).container.backupService.uriFor(morningFile),
+            (application as BorgPharmacyApplication).container.backupService.uriFor(eveningFile),
+        )
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "image/png"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            putExtra(Intent.EXTRA_TEXT, "جداول زيارات اليوم - صيدلية برج الأطباء")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "مشاركة كحالة واتساب"))
+    }
+
+    private fun createStoryBitmap(
+        dateText: String,
+        weekText: String,
+        shiftTitle: String,
+        shiftIcon: String,
+        companies: List<String>,
+        accent: Int,
+        soft: Int,
+        file: File,
+    ) {
+        val width = 1080
+        val height = 1920
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val cairo = ResourcesCompat.getFont(this, R.font.cairo_bold) ?: Typeface.DEFAULT_BOLD
+
+        fun round(l: Float, t: Float, r: Float, b: Float, color: Int, radius: Float = 34f, strokeColor: Int? = null, strokeWidth: Float = 4f) {
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
+            canvas.drawRoundRect(l, t, r, b, radius, radius, p)
+            if (strokeColor != null) {
+                p.style = Paint.Style.STROKE
+                p.strokeWidth = strokeWidth
+                p.color = strokeColor
+                canvas.drawRoundRect(l, t, r, b, radius, radius, p)
+            }
+        }
+
+        fun ellipsize(text: String, paint: Paint, maxWidth: Float): String {
+            if (paint.measureText(text) <= maxWidth) return text
+            var end = text.length
+            while (end > 1 && paint.measureText(text.substring(0, end) + "…") > maxWidth) end--
+            return text.substring(0, end).trim() + "…"
+        }
+
+        fun splitTwoLines(text: String, paint: Paint, maxWidth: Float): List<String> {
+            if (paint.measureText(text) <= maxWidth) return listOf(text)
+            val words = text.split(" ").filter { it.isNotBlank() }
+            if (words.size <= 1) return listOf(ellipsize(text, paint, maxWidth))
+            var first = ""
+            var index = 0
+            while (index < words.size) {
+                val candidate = if (first.isBlank()) words[index] else "$first ${words[index]}"
+                if (paint.measureText(candidate) > maxWidth) break
+                first = candidate
+                index++
+            }
+            if (first.isBlank()) return listOf(ellipsize(text, paint, maxWidth))
+            val secondRaw = words.drop(index).joinToString(" ")
+            return if (secondRaw.isBlank()) listOf(first) else listOf(first, ellipsize(secondRaw, paint, maxWidth))
+        }
+
+        canvas.drawColor(Color.rgb(244, 248, 252))
+
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(234, 239, 246); style = Paint.Style.FILL }
+        canvas.drawRoundRect(24f, 24f, width - 24f, height - 24f, 48f, 48f, bgPaint)
+
+        val header = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(36, 91, 199), Color.rgb(47, 145, 241))).apply { cornerRadius = 44f }
+        header.setBounds(72, 90, width - 72, 390)
+        header.draw(canvas)
+
+        val datePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            typeface = cairo
+            textAlign = Paint.Align.CENTER
+            textSize = 54f
+        }
+        val weekPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(230, 242, 255)
+            typeface = cairo
+            textAlign = Paint.Align.CENTER
+            textSize = 34f
+        }
+        canvas.drawText(dateText, width / 2f, 205f, datePaint)
+        canvas.drawText(weekText, width / 2f, 290f, weekPaint)
+
+        val shiftTop = 460f
+        val shiftBottom = 620f
+        round(72f, shiftTop, width - 72f, shiftBottom, soft, 34f, accent, 4f)
+        val shiftPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(7, 31, 58)
+            typeface = cairo
+            textAlign = Paint.Align.RIGHT
+            textSize = 54f
+        }
+        val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            typeface = cairo
+            textAlign = Paint.Align.LEFT
+            textSize = 62f
+        }
+        canvas.drawText(shiftTitle, width - 190f, 555f, shiftPaint)
+        canvas.drawText(shiftIcon, 145f, 555f, iconPaint)
+
+        val count = companies.size
+        val listTop = 660f
+        val footerTop = 1780f
+        val available = footerTop - listTop
+        val gap = when {
+            count <= 12 -> 18f
+            count <= 18 -> 12f
+            count <= 30 -> 7f
+            count <= 60 -> 3f
+            else -> 1.5f
+        }
+        val rowHeight = if (count == 0) 110f else ((available - gap * (count - 1)) / count).coerceIn(7f, 92f)
+        val textSize = when {
+            rowHeight >= 76f -> 38f
+            rowHeight >= 58f -> 31f
+            rowHeight >= 44f -> 24f
+            rowHeight >= 28f -> 18f
+            rowHeight >= 18f -> 12f
+            else -> 7f
+        }
+        val cardTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(7, 31, 58)
+            typeface = cairo
+            textAlign = Paint.Align.RIGHT
+            this.textSize = textSize
+        }
+        val numPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = accent
+            typeface = cairo
+            textAlign = Paint.Align.CENTER
+            this.textSize = (textSize * 0.72f).coerceAtLeast(14f)
+        }
+
+        if (companies.isEmpty()) {
+            round(92f, listTop + 120f, width - 92f, listTop + 250f, Color.WHITE, 28f, accent, 4f)
+            canvas.drawText("لا توجد شركات مجدولة في هذه الفترة", width / 2f, listTop + 200f, Paint(cardTextPaint).apply { textAlign = Paint.Align.CENTER; this.textSize = 34f })
+        } else {
+            var y = listTop
+            companies.forEachIndexed { index, name ->
+                val l = 78f
+                val r = width - 78f
+                val t = y
+                val b = y + rowHeight
+                round(l, t, r, b, Color.WHITE, 24f, accent, 3.5f)
+                val stripPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent; strokeWidth = 8f }
+                canvas.drawLine(r - 10f, t + 10f, r - 10f, b - 10f, stripPaint)
+
+                val numberX = r - 48f
+                val centerY = (t + b) / 2f
+                canvas.drawText((index + 1).toString(), numberX, centerY + numPaint.textSize / 3f, numPaint)
+
+                val textRight = r - 88f
+                val maxTextWidth = r - l - 145f
+                if (rowHeight >= 58f) {
+                    val lines = splitTwoLines(name, cardTextPaint, maxTextWidth)
+                    if (lines.size == 1) {
+                        canvas.drawText(lines[0], textRight, centerY + cardTextPaint.textSize / 3f, cardTextPaint)
+                    } else {
+                        canvas.drawText(lines[0], textRight, centerY - 5f, cardTextPaint)
+                        canvas.drawText(lines[1], textRight, centerY + cardTextPaint.textSize + 4f, cardTextPaint)
+                    }
+                } else {
+                    canvas.drawText(ellipsize(name, cardTextPaint, maxTextWidth), textRight, centerY + cardTextPaint.textSize / 3f, cardTextPaint)
+                }
+                y += rowHeight + gap
+            }
+        }
+
+        val footerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(96, 125, 155)
+            typeface = cairo
+            textAlign = Paint.Align.CENTER
+            this.textSize = 42f
+        }
+        canvas.drawText("صيدلية برج الأطباء - إدارة الصيدلية", width / 2f, 1840f, footerPaint)
+
+        file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+
+    private fun exportCompanies(format: String, companies: List<Company>) {
+        val dir = File(getExternalFilesDir(null), "EXPORTS").apply { mkdirs() }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val file = when (format.lowercase(Locale.US)) {
+            "csv" -> File(dir, "borg_companies_$stamp.csv").also { writeCompaniesCsv(it, companies) }
+            "html" -> File(dir, "borg_companies_$stamp.html").also { writeCompaniesHtml(it, companies) }
+            "pdf" -> File(dir, "borg_companies_$stamp.pdf").also { writeCompaniesPdf(it, companies) }
+            else -> return
+        }
+        val uri = (application as BorgPharmacyApplication).container.backupService.uriFor(file)
+        val mime = when (file.extension.lowercase(Locale.US)) {
+            "csv" -> "text/csv"
+            "html" -> "text/html"
+            "pdf" -> "application/pdf"
+            else -> "application/octet-stream"
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "تصدير شركات صيدلية برج الأطباء")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "تصدير الشركات"))
+    }
+
+    private fun writeCompaniesCsv(file: File, companies: List<Company>) {
+        fun csv(value: String): String = "\"${value.replace("\"", "\"\"")}\""
+        file.writeText(
+            buildString {
+                append("\uFEFFCompany ID,Company Name,Tier\n")
+                companies.sortedBy { it.name }.forEach { company ->
+                    append(csv(company.id)).append(',')
+                    append(csv(company.name)).append(',')
+                    append(csv(company.tier.name)).append('\n')
+                }
+            },
+            Charsets.UTF_8,
+        )
+    }
+
+    private fun writeCompaniesHtml(file: File, companies: List<Company>) {
+        fun esc(value: String): String = value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+        file.writeText(
+            buildString {
+                append("""
+                    <!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
+                    <style>body{font-family:Arial,sans-serif;padding:24px}table{width:100%;border-collapse:collapse}th{background:#0E4D8F;color:white}td,th{border:1px solid #ddd;padding:8px;text-align:right}tr:nth-child(even){background:#f7f9fc}</style>
+                    <title>شركات صيدلية برج الأطباء</title></head><body>
+                    <h1>شركات صيدلية برج الأطباء</h1><p>الإجمالي: ${companies.size}</p><table><thead><tr><th>#</th><th>اسم الشركة</th><th>Company ID</th><th>التقييم</th></tr></thead><tbody>
+                """.trimIndent())
+                companies.sortedBy { it.name }.forEachIndexed { index, company ->
+                    append("<tr><td>${index + 1}</td><td>${esc(company.name)}</td><td>${esc(company.id)}</td><td>${esc(company.tier.name)}</td></tr>")
+                }
+                append("</tbody></table></body></html>")
+            },
+            Charsets.UTF_8,
+        )
+    }
+
+    private fun writeCompaniesPdf(file: File, companies: List<Company>) {
+        val document = PdfDocument()
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(14, 77, 143)
+            textSize = 20f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            textAlign = Paint.Align.RIGHT
+        }
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = 12f
+            textAlign = Paint.Align.RIGHT
+        }
+        val pageWidth = 595
+        val pageHeight = 842
+        var pageNumber = 1
+        var page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
+        var canvas = page.canvas
+        var y = 44f
+        fun newPage() {
+            document.finishPage(page)
+            pageNumber++
+            page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
+            canvas = page.canvas
+            y = 44f
+        }
+        canvas.drawText("شركات صيدلية برج الأطباء", pageWidth - 36f, y, titlePaint)
+        y += 30f
+        canvas.drawText("الإجمالي: ${companies.size}", pageWidth - 36f, y, paint)
+        y += 26f
+        companies.sortedBy { it.name }.forEachIndexed { index, company ->
+            if (y > pageHeight - 40f) newPage()
+            val line = "${index + 1}. ${company.name}    ${company.tier.name}    ${company.id.take(8)}"
+            canvas.drawText(line, pageWidth - 36f, y, paint)
+            y += 18f
+        }
+        document.finishPage(page)
+        file.outputStream().use { document.writeTo(it) }
+        document.close()
+    }
+
+    private fun exportSchedules(format: String, state: BorgUiState) {
+        val dir = File(getExternalFilesDir(null), "EXPORTS").apply { mkdirs() }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val file = when (format.lowercase(Locale.US)) {
+            "csv" -> File(dir, "borg_weekly_schedules_$stamp.csv").also { writeSchedulesCsv(it, state) }
+            "html" -> File(dir, "borg_weekly_schedules_$stamp.html").also { writeSchedulesHtml(it, state) }
+            "pdf" -> File(dir, "borg_weekly_schedules_$stamp.pdf").also { writeSchedulesPdf(it, state) }
+            else -> return
+        }
+        shareFile(file, "تصدير جداول زيارات صيدلية برج الأطباء")
+    }
+
+    private fun shareFile(file: File, subject: String) {
+        val uri = (application as BorgPharmacyApplication).container.backupService.uriFor(file)
+        val mime = when (file.extension.lowercase(Locale.US)) {
+            "csv" -> "text/csv"
+            "html" -> "text/html"
+            "pdf" -> "application/pdf"
+            else -> "application/octet-stream"
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, subject)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, subject))
+    }
+
+    private fun writeSchedulesCsv(file: File, state: BorgUiState) {
+        fun csv(value: String): String = "\"${value.replace("\"", "\"\"")}\""
+        val companies = state.companies.associateBy { it.id }
+        val currentEpoch = state.cycleInfo.currentCycleStart.toEpochDay()
+        file.writeText(buildString {
+            append("\uFEFFWeek,Date,Day,Shift,No,Company,Company ID\n")
+            (1..4).forEach { week ->
+                val weekStart = state.cycleInfo.currentCycleStart.plusDays(((week - 1) * 7).toLong())
+                (0..4).forEach { dayOffset ->
+                    val date = weekStart.plusDays(dayOffset.toLong())
+                    listOf(Shift.MORNING, Shift.EVENING).forEach { shift ->
+                        state.visits.filter { it.cycleStartEpochDay == currentEpoch && it.date == date && it.shift == shift }
+                            .scheduleDisplaySorted().forEachIndexed { index, visit ->
+                                append(week).append(',').append(csv(date.toString())).append(',')
+                                append(csv(visit.date.dayOfWeek.borgArabicName())).append(',')
+                                append(csv(visit.shift.arabicName)).append(',').append(index + 1).append(',')
+                                append(csv(companies[visit.companyId]?.name ?: "شركة غير معروفة")).append(',')
+                                append(csv(visit.companyId)).append('\n')
+                            }
+                    }
+                }
+            }
+        }, Charsets.UTF_8)
+    }
+
+    private fun writeSchedulesHtml(file: File, state: BorgUiState) {
+        fun esc(value: String): String = value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+        val companies = state.companies.associateBy { it.id }
+        val currentEpoch = state.cycleInfo.currentCycleStart.toEpochDay()
+
+        fun listHtml(date: java.time.LocalDate, shift: Shift): String {
+            val visits = state.visits
+                .filter { it.cycleStartEpochDay == currentEpoch && it.date == date && it.shift == shift }
+                .scheduleDisplaySorted()
+            val densityClass = when {
+                visits.size >= 28 -> " ultra-dense"
+                visits.size >= 20 -> " very-dense"
+                visits.size >= 14 -> " dense"
+                else -> ""
+            }
+            return buildString {
+                append("<section class='shift ${if (shift == Shift.MORNING) "morning" else "evening"}$densityClass'>")
+                append("<header class='shift-title'><span>${esc(shift.arabicName)}</span><b>${visits.size}</b></header>")
+                append("<div class='visit-list'>")
+                visits.forEachIndexed { index, visit ->
+                    val companyName = companies[visit.companyId]?.name ?: "شركة غير معروفة"
+                    append("<article class='company-card'>")
+                    append("<span class='index'>${index + 1}</span>")
+                    append("<span class='name'>${esc(companyName)}</span>")
+                    append("</article>")
+                }
+                append("</div></section>")
+            }
+        }
+
+        fun dayHtml(weekStart: java.time.LocalDate, dayOffset: Int): String {
+            val date = weekStart.plusDays(dayOffset.toLong())
+            return buildString {
+                append("<div class='day-column'>")
+                append("<h3 class='day-title'>${esc(date.dayOfWeek.borgArabicName())}<br><span>${date}</span></h3>")
+                append(listHtml(date, Shift.MORNING))
+                append(listHtml(date, Shift.EVENING))
+                append("</div>")
+            }
+        }
+
+        file.writeText(buildString {
+            append("""
+                <!DOCTYPE html>
+                <html lang="ar" dir="rtl">
+                <head>
+                  <meta charset="UTF-8">
+                  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                  <title>جداول زيارات صيدلية برج الأطباء</title>
+                  <style>
+                    @page { size: A4 portrait; margin: 10mm; }
+                    * { box-sizing: border-box; }
+                    html, body { margin: 0; padding: 0; }
+                    body {
+                      font-family: 'Cairo', 'Tajawal', Tahoma, Arial, sans-serif;
+                      background: #e8eef6;
+                      color: #082B52;
+                      -webkit-print-color-adjust: exact;
+                      print-color-adjust: exact;
+                    }
+                    .print-page {
+                      width: 190mm;
+                      height: 277mm;
+                      margin: 0 auto 12px auto;
+                      padding: 0;
+                      display: flex;
+                      flex-direction: column;
+                      overflow: hidden;
+                      break-after: page;
+                      page-break-after: always;
+                      page-break-inside: avoid;
+                      background: #f8fafc;
+                      border: 1px solid #e2e8f0;
+                      border-radius: 14px;
+                    }
+                    .print-page.first { break-after: page; page-break-after: always; }
+                    .print-page:last-child { break-after: auto; page-break-after: auto; }
+                    .page-header {
+                      flex: 0 0 auto;
+                      display: flex;
+                      justify-content: space-between;
+                      align-items: center;
+                      padding: 0 0 5mm 0;
+                      margin: 0 0 4mm 0;
+                      border-bottom: 1.2mm solid #0E4D8F;
+                      page-break-inside: avoid;
+                    }
+                    .page-header h1 { margin: 0; font-size: 17pt; font-weight: 900; color: #082B52; line-height: 1.15; }
+                    .page-header h2 { margin: 0; font-size: 12pt; font-weight: 900; color: #0E4D8F; line-height: 1.15; }
+                    .days-grid {
+                      flex: 1 1 auto;
+                      min-height: 0;
+                      display: flex;
+                      gap: 4mm;
+                      overflow: hidden;
+                    }
+                    .days-grid.three .day-column { flex: 1 1 33.333%; }
+                    .days-grid.two .day-column { flex: 1 1 50%; }
+                    .day-column {
+                      min-width: 0;
+                      min-height: 0;
+                      background: #ffffff;
+                      border: 0.35mm solid #e2e8f0;
+                      border-radius: 5mm;
+                      padding: 3mm;
+                      display: flex;
+                      flex-direction: column;
+                      gap: 3mm;
+                      overflow: hidden;
+                      page-break-inside: avoid;
+                      break-inside: avoid;
+                    }
+                    .day-title {
+                      flex: 0 0 auto;
+                      text-align: center;
+                      margin: 0;
+                      color: #082B52;
+                      font-size: 12pt;
+                      font-weight: 900;
+                      line-height: 1.1;
+                      page-break-inside: avoid;
+                    }
+                    .day-title span { color: #64748b; font-size: 8pt; font-weight: 800; }
+                    .shift {
+                      flex: 1 1 0;
+                      min-height: 0;
+                      border-radius: 4mm;
+                      padding: 2.2mm;
+                      display: flex;
+                      flex-direction: column;
+                      gap: 1.7mm;
+                      overflow: hidden;
+                      page-break-inside: avoid;
+                      break-inside: avoid;
+                    }
+                    .morning { background: #EAF4FF; }
+                    .evening { background: #FFF0F4; }
+                    .shift-title {
+                      flex: 0 0 auto;
+                      display: flex;
+                      justify-content: space-between;
+                      align-items: center;
+                      margin: 0;
+                      font-size: 9pt;
+                      font-weight: 900;
+                      line-height: 1.1;
+                      page-break-inside: avoid;
+                    }
+                    .morning .shift-title { color: #0E4D8F; }
+                    .evening .shift-title { color: #C8172B; }
+                    .shift-title b {
+                      display: inline-flex;
+                      align-items: center;
+                      justify-content: center;
+                      min-width: 7mm;
+                      height: 6mm;
+                      border-radius: 99px;
+                      background: rgba(255,255,255,.78);
+                      font-size: 8pt;
+                    }
+                    .visit-list {
+                      flex: 1 1 auto;
+                      min-height: 0;
+                      display: flex;
+                      flex-direction: column;
+                      gap: 1.35mm;
+                      overflow: hidden;
+                    }
+                    .company-card {
+                      flex: 0 1 auto;
+                      display: flex;
+                      align-items: center;
+                      gap: 1.6mm;
+                      width: 100%;
+                      background: #ffffff;
+                      border-radius: 2.8mm;
+                      padding: 1.55mm 1.45mm;
+                      color: #082B52;
+                      font-size: 8.3pt;
+                      font-weight: 900;
+                      line-height: 1.2;
+                      box-shadow: 0 0.6mm 1.2mm rgba(15,23,42,.06);
+                      border-right: 1.1mm solid #cbd5e1;
+                      page-break-inside: avoid;
+                      break-inside: avoid;
+                      overflow: hidden;
+                    }
+                    .dense .company-card { font-size: 7.3pt; padding: 1.15mm 1.25mm; line-height: 1.12; }
+                    .very-dense .company-card { font-size: 6.4pt; padding: .75mm 1.05mm; line-height: 1.06; }
+                    .ultra-dense .company-card { font-size: 5.5pt; padding: .48mm .85mm; line-height: 1.0; }
+                    .morning .company-card { border-right-color: #0E4D8F; }
+                    .evening .company-card { border-right-color: #C8172B; }
+                    .index {
+                      flex: 0 0 6mm;
+                      text-align: center;
+                      font-weight: 900;
+                      color: #64748b;
+                    }
+                    .name {
+                      flex: 1 1 auto;
+                      min-width: 0;
+                      white-space: normal;
+                      overflow-wrap: anywhere;
+                      word-break: normal;
+                    }
+                    @media print {
+                      body { background: #fff; }
+                      .print-page { margin: 0; border: none; border-radius: 0; box-shadow: none; }
+                    }
+                  </style>
+                </head>
+                <body>
+            """.trimIndent())
+
+            (1..4).forEach { week ->
+                val weekStart = state.cycleInfo.currentCycleStart.plusDays(((week - 1) * 7).toLong())
+                append("<section class='print-page first'><div class='page-header'><h1>جداول زيارات صيدلية برج الأطباء</h1><h2>الأسبوع $week - السبت إلى الإثنين</h2></div><div class='days-grid three'>")
+                (0..2).forEach { dayOffset -> append(dayHtml(weekStart, dayOffset)) }
+                append("</div></section>")
+                append("<section class='print-page'><div class='page-header'><h1>جداول زيارات صيدلية برج الأطباء</h1><h2>الأسبوع $week - الثلاثاء والأربعاء</h2></div><div class='days-grid two'>")
+                (3..4).forEach { dayOffset -> append(dayHtml(weekStart, dayOffset)) }
+                append("</div></section>")
+            }
+            append("</body></html>")
+        }, Charsets.UTF_8)
+    }
+    private fun writeSchedulesPdf(file: File, state: BorgUiState) {
+        val companies = state.companies.associateBy { it.id }
+        val currentEpoch = state.cycleInfo.currentCycleStart.toEpochDay()
+        val document = PdfDocument()
+        val cairo = ResourcesCompat.getFont(this, R.font.cairo_bold) ?: Typeface.DEFAULT_BOLD
+        val pageWidth = 595
+        val pageHeight = 842
+        val margin = 28.35f // 10mm at 72dpi
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(8, 43, 82); textSize = 17f; typeface = cairo; textAlign = Paint.Align.RIGHT }
+        val subtitlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(14, 77, 143); textSize = 12f; typeface = cairo; textAlign = Paint.Align.LEFT }
+        val dayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(8,43,82); textSize = 12f; typeface = cairo; textAlign = Paint.Align.CENTER }
+        val smallPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(100,116,139); textSize = 7.5f; typeface = cairo; textAlign = Paint.Align.CENTER }
+        val rowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(8,43,82); textSize = 8.2f; typeface = cairo; textAlign = Paint.Align.RIGHT }
+        val indexPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(100,116,139); textSize = 7.5f; typeface = cairo; textAlign = Paint.Align.CENTER }
+        fun ellipsize(text: String, max: Int) = if (text.length <= max) text else text.take(max - 1) + "…"
+        fun round(canvas: android.graphics.Canvas, l: Float, t: Float, r: Float, b: Float, color: Int, radius: Float = 10f, stroke: Int? = null, strokeWidth: Float = 1f) {
+            val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = color; style = Paint.Style.FILL }
+            canvas.drawRoundRect(l, t, r, b, radius, radius, p)
+            if (stroke != null) { p.style = Paint.Style.STROKE; p.strokeWidth = strokeWidth; p.color = stroke; canvas.drawRoundRect(l, t, r, b, radius, radius, p) }
+        }
+        fun drawShift(canvas: android.graphics.Canvas, x: Float, y: Float, w: Float, h: Float, title: String, visits: List<Visit>, accent: Int, bg: Int) {
+            round(canvas, x, y, x + w, y + h, bg, 9f)
+            val headerPaint = Paint(rowPaint).apply { color = accent; textSize = 9f; typeface = cairo }
+            canvas.drawText("$title  (${visits.size})", x + w - 7f, y + 14f, headerPaint)
+            val available = (h - 24f).coerceAtLeast(12f)
+            val rowH = if (visits.isEmpty()) 16f else (available / visits.size).coerceAtMost(16f).coerceAtLeast(4.2f)
+            val fontSize = (rowH * 0.50f).coerceAtMost(8.2f).coerceAtLeast(3.6f)
+            val dynRowPaint = Paint(rowPaint).apply { textSize = fontSize; typeface = cairo }
+            val dynIndexPaint = Paint(indexPaint).apply { textSize = (fontSize * .90f).coerceAtLeast(3.2f); typeface = cairo }
+            var cy = y + 23f
+            visits.forEachIndexed { index, visit ->
+                if (cy >= y + h - 2f) return@forEachIndexed
+                val cardTop = cy
+                val cardBottom = (cy + rowH * .82f).coerceAtMost(y + h - 2f)
+                round(canvas, x + 5f, cardTop, x + w - 5f, cardBottom, Color.WHITE, 6f)
+                val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = accent; strokeWidth = 2f }
+                canvas.drawLine(x + w - 7f, cardTop + 1f, x + w - 7f, cardBottom - 1f, linePaint)
+                val baseline = cardTop + (cardBottom - cardTop) * .66f
+                canvas.drawText((index + 1).toString(), x + w - 17f, baseline, dynIndexPaint)
+                val maxChars = when { fontSize < 4.5f -> 30; fontSize < 6f -> 26; else -> 23 }
+                canvas.drawText(ellipsize(companies[visit.companyId]?.name ?: "شركة غير معروفة", maxChars), x + w - 30f, baseline, dynRowPaint)
+                cy += rowH
+            }
+        }
+        fun drawPage(week: Int, title: String, range: IntRange, pageNo: Int) {
+            val weekStart = state.cycleInfo.currentCycleStart.plusDays(((week - 1) * 7).toLong())
+            val page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNo).create())
+            val c = page.canvas
+            c.drawColor(Color.WHITE)
+            val l = margin
+            val t = margin
+            val r = pageWidth - margin
+            val b = pageHeight - margin
+            c.drawText("جداول زيارات صيدلية برج الأطباء", r, t + 18f, titlePaint)
+            c.drawText(title, l, t + 18f, subtitlePaint)
+            val underline = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(14,77,143); strokeWidth = 3f }
+            c.drawLine(l, t + 30f, r, t + 30f, underline)
+            val cols = range.count()
+            val gap = 10f
+            val top = t + 44f
+            val colH = b - top
+            val colW = (r - l - (cols - 1) * gap) / cols
+            range.forEachIndexed { i, dayOffset ->
+                val x = l + i * (colW + gap)
+                val date = weekStart.plusDays(dayOffset.toLong())
+                round(c, x, top, x + colW, top + colH, Color.WHITE, 12f, Color.rgb(226,232,240), 1f)
+                c.drawText(date.dayOfWeek.borgArabicName(), x + colW / 2, top + 18f, dayPaint)
+                c.drawText(date.toString(), x + colW / 2, top + 31f, smallPaint)
+                val dayVisits = state.visits.filter { it.cycleStartEpochDay == currentEpoch && it.date == date }
+                val shiftTop = top + 43f
+                val shiftH = (colH - 50f) / 2f
+                drawShift(c, x + 7f, shiftTop, colW - 14f, shiftH, "الفترة الصباحية", dayVisits.filter { it.shift == Shift.MORNING }.scheduleDisplaySorted(), Color.rgb(14,77,143), Color.rgb(234,244,255))
+                drawShift(c, x + 7f, shiftTop + shiftH + 8f, colW - 14f, shiftH, "الفترة المسائية", dayVisits.filter { it.shift == Shift.EVENING }.scheduleDisplaySorted(), Color.rgb(200,23,43), Color.rgb(255,240,244))
+            }
+            document.finishPage(page)
+        }
+        var pageNo = 1
+        (1..4).forEach { week ->
+            drawPage(week, "الأسبوع $week - السبت إلى الإثنين", 0..2, pageNo++)
+            drawPage(week, "الأسبوع $week - الثلاثاء والأربعاء", 3..4, pageNo++)
+        }
+        file.outputStream().use { document.writeTo(it) }
+        document.close()
+    }
+
+    private fun List<Visit>.scheduleDisplaySorted(): List<Visit> = sortedWith(compareBy<Visit> { it.createdAt }.thenBy { it.id })
+
+
+    private data class MonthlyCompanyReport(
+        val company: Company,
+        val representatives: List<Representative>,
+        val visitsByWeek: Map<Int, Visit>,
+        val printedByRepWeek: Map<Pair<String, Int>, Boolean>,
+        val percent: Int,
+    ) {
+        fun printed(rep: Representative, week: Int): Boolean = printedByRepWeek[rep.id to week] == true
+    }
+
+    private fun exportMonthlyReport(format: String, from: LocalDate, to: LocalDate, state: BorgUiState) {
+        val safeFrom = minOf(from, to)
+        val safeTo = maxOf(from, to)
+        val dir = File(getExternalFilesDir(null), "EXPORTS").apply { mkdirs() }
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val allReports = monthlyCompanyReports(safeFrom, safeTo, state)
+        val reports = allReports.filterNot { it.representatives.isEmpty() && it.visitsByWeek.isEmpty() }
+        val noActivityCompanies = state.companies
+            .filter { company ->
+                state.repsByCompany[company.id].orEmpty().isEmpty() &&
+                    state.visits.none { it.companyId == company.id && !it.isDeleted && it.date in safeFrom..safeTo }
+            }
+            .sortedBy { it.name }
+
+        val file = when (format.lowercase(Locale.US)) {
+            "csv" -> File(dir, "borg_monthly_report_$stamp.csv").also { writeMonthlyReportCsv(it, safeFrom, safeTo, reports, noActivityCompanies) }
+            "html" -> File(dir, "borg_monthly_report_$stamp.html").also { writeMonthlyReportHtml(it, safeFrom, safeTo, reports, noActivityCompanies) }
+            "pdf" -> File(dir, "borg_monthly_report_$stamp.pdf").also { writeMonthlyReportPdf(it, safeFrom, safeTo, reports, noActivityCompanies) }
+            else -> return
+        }
+        val uri = (application as BorgPharmacyApplication).container.backupService.uriFor(file)
+        val mime = when (file.extension.lowercase(Locale.US)) {
+            "csv" -> "text/csv"
+            "html" -> "text/html"
+            "pdf" -> "application/pdf"
+            else -> "application/octet-stream"
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "التقرير الشهري لصيدلية برج الأطباء")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "تصدير التقرير الشهري"))
+    }
+
+    private fun monthlyCompanyReports(from: LocalDate, to: LocalDate, state: BorgUiState): List<MonthlyCompanyReport> {
+        val printCounts = state.printCountMap
+        return state.companies
+            .map { company ->
+                val reps = state.repsByCompany[company.id].orEmpty().sortedBy { it.name }
+                val visitsByWeek = state.visits
+                    .filter { it.companyId == company.id && !it.isDeleted && it.date in from..to }
+                    .groupBy { it.weekOfCycle }
+                    .mapValues { (_, visits) -> visits.sortedWith(compareBy<Visit> { it.date }.thenBy { it.shift.ordinal }).first() }
+                val printedByRepWeek = reps.flatMap { rep ->
+                    visitsByWeek.map { (week, visit) ->
+                        (rep.id to week) to ((printCounts[rep.id to visit.id] ?: 0) > 0)
+                    }
+                }.toMap()
+                val expected = reps.size * visitsByWeek.size
+                val completed = printedByRepWeek.count { it.value }
+                val percent = if (expected == 0) 0 else ((completed * 100.0) / expected).toInt().coerceIn(0, 100)
+                MonthlyCompanyReport(company, reps, visitsByWeek, printedByRepWeek, percent)
+            }
+            .sortedWith(compareByDescending<MonthlyCompanyReport> { it.representatives.size }.thenBy { it.company.name })
+    }
+
+    private fun writeMonthlyReportCsv(file: File, from: LocalDate, to: LocalDate, reports: List<MonthlyCompanyReport>, noActivityCompanies: List<Company>) {
+        fun csv(value: String): String = "\"${value.replace("\"", "\"\"")}\""
+        file.writeText(buildString {
+            append("\uFEFFالتقرير الشهري من,${csv(from.toString())},إلى,${csv(to.toString())}\n")
+            append("اسم الشركة,مندوبين الشركة,الأسبوع 1,الأسبوع 2,الأسبوع 3,الأسبوع 4,تقييم الشركة\n")
+            reports.forEach { report ->
+                val reps = report.representatives.ifEmpty { listOf(Representative(companyId = report.company.id, name = "لا يوجد مندوب")) }
+                reps.forEach { rep ->
+                    append(csv(report.company.name)).append(',')
+                    append(csv(rep.name)).append(',')
+                    (1..4).forEach { week ->
+                        val visit = report.visitsByWeek[week]
+                        val printed = visit != null && report.representatives.isNotEmpty() && report.printed(rep, week)
+                        append(csv(if (visit == null) "-" else "${visit.date} ${if (printed) "✓" else "✕"}")).append(',')
+                    }
+                    append(csv("${report.percent}%")).append('\n')
+                }
+            }
+            append("\nشركات بدون مندوبين وبدون زيارات\n")
+            append("اسم الشركة\n")
+            noActivityCompanies.forEach { append(csv(it.name)).append('\n') }
+        }, Charsets.UTF_8)
+    }
+
+    private fun writeMonthlyReportHtml(file: File, from: LocalDate, to: LocalDate, reports: List<MonthlyCompanyReport>, noActivityCompanies: List<Company>) {
+        fun esc(value: String): String = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+        file.writeText(buildString {
+            append("""
+                <!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8">
+                <style>
+                body{font-family:Arial,sans-serif;padding:24px;color:#082B52} h1{color:#0E4D8F}.company{page-break-inside:avoid;margin:22px 0;padding:14px;border:1px solid #dbe7f3;border-radius:14px}
+                table{width:100%;border-collapse:collapse;margin-top:8px} th{background:#0E4D8F;color:white}td,th{border:1px solid #ddd;padding:8px;text-align:center}.ok{color:#149447;font-weight:900}.bad{color:#C8172B;font-weight:900}.score{font-weight:900;color:#0E4D8F}
+                </style><title>التقرير الشهري</title></head><body><h1>التقرير الشهري</h1><p>من ${esc(from.toString())} إلى ${esc(to.toString())}</p>
+            """.trimIndent())
+            reports.forEach { report ->
+                append("<section class='company'><h2>اسم الشركة: ${esc(report.company.name)}</h2>")
+                append("<table><thead><tr><th>مندوبين الشركة</th>")
+                (1..4).forEach { week -> append("<th>تاريخ زيارة الأسبوع $week<br>${esc(report.visitsByWeek[week]?.date?.toString() ?: "-")}</th>") }
+                append("</tr></thead><tbody>")
+                val reps = report.representatives.ifEmpty { listOf(Representative(companyId = report.company.id, name = "لا يوجد مندوب")) }
+                reps.forEach { rep ->
+                    append("<tr><td>${esc(rep.name)}</td>")
+                    (1..4).forEach { week ->
+                        val visit = report.visitsByWeek[week]
+                        val printed = visit != null && report.representatives.isNotEmpty() && report.printed(rep, week)
+                        append(if (visit == null) "<td>-</td>" else "<td class='${if (printed) "ok" else "bad"}'>${if (printed) "✓" else "✕"}</td>")
+                    }
+                    append("</tr>")
+                }
+                append("</tbody></table><p class='score'>تقييم الشركة: ${report.percent}%</p></section>")
+            }
+            append("<h2>الشركات التي ليس لديها مندوبين وليس لديها زيارات</h2><table><thead><tr><th>#</th><th>اسم الشركة</th></tr></thead><tbody>")
+            noActivityCompanies.forEachIndexed { index, company -> append("<tr><td>${index + 1}</td><td>${esc(company.name)}</td></tr>") }
+            append("</tbody></table></body></html>")
+        }, Charsets.UTF_8)
+    }
+
+    private fun writeMonthlyReportPdf(file: File, from: LocalDate, to: LocalDate, reports: List<MonthlyCompanyReport>, noActivityCompanies: List<Company>) {
+        val document = PdfDocument()
+        val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(14, 77, 143); textSize = 18f; typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD); textAlign = Paint.Align.RIGHT }
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; textSize = 10f; textAlign = Paint.Align.RIGHT }
+        val greenPaint = Paint(paint).apply { color = Color.rgb(20, 148, 71); typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
+        val redPaint = Paint(paint).apply { color = Color.rgb(200, 23, 43); typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD) }
+        val pageWidth = 595
+        val pageHeight = 842
+        var pageNumber = 1
+        var page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create())
+        var canvas = page.canvas
+        var y = 42f
+        fun newPage() { document.finishPage(page); pageNumber++; page = document.startPage(PdfDocument.PageInfo.Builder(pageWidth, pageHeight, pageNumber).create()); canvas = page.canvas; y = 42f }
+        fun line(text: String, p: Paint = paint, step: Float = 16f) { if (y > pageHeight - 42f) newPage(); canvas.drawText(text, pageWidth - 32f, y, p); y += step }
+        line("التقرير الشهري", titlePaint, 24f)
+        line("من $from إلى $to", paint, 22f)
+        reports.forEach { report ->
+            line("اسم الشركة: ${report.company.name}", titlePaint, 22f)
+            val reps = report.representatives.ifEmpty { listOf(Representative(companyId = report.company.id, name = "لا يوجد مندوب")) }
+            reps.forEach { rep ->
+                val cells = (1..4).joinToString(" | ") { week ->
+                    val visit = report.visitsByWeek[week]
+                    if (visit == null) "أ$week:-" else "أ$week:${visit.date}:${if (report.representatives.isNotEmpty() && report.printed(rep, week)) "OK" else "X"}"
+                }
+                line("${rep.name}: $cells", paint, 15f)
+            }
+            line("تقييم الشركة: ${report.percent}%", if (report.percent >= 70) greenPaint else redPaint, 20f)
+        }
+        line("الشركات التي ليس لديها مندوبين وليس لديها زيارات", titlePaint, 22f)
+        noActivityCompanies.forEachIndexed { index, company -> line("${index + 1}. ${company.name}", paint, 14f) }
+        document.finishPage(page)
+        file.outputStream().use { document.writeTo(it) }
+        document.close()
+    }
+
+    private fun shareLatestBackupToDrive() {
+        val container = (application as BorgPharmacyApplication).container
+        lifecycleScope.launch {
+            val file = container.backupService.dumpDatabase("drive")
+            val uri = container.backupService.uriFor(file)
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/octet-stream"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                putExtra(Intent.EXTRA_SUBJECT, "نسخة احتياطية قاعدة بيانات صيدلية برج الأطباء")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(intent, "نسخ احتياطي سحابي عبر Google Drive"))
+        }
+    }
+
+    private fun requestBackupStorageAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN), 2605)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                val uri = Uri.parse("package:$packageName")
+                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri))
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            requestPermissions(
+                arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                2604,
+            )
+        }
+    }
+
+    private fun restartApplication() {
+        val intent = packageManager.getLaunchIntentForPackage(packageName)
+        intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
+        finish()
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
+}

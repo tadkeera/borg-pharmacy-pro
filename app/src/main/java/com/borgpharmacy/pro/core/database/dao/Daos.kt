@@ -1,0 +1,10 @@
+package com.borgpharmacy.pro.core.database.dao
+import androidx.room.*
+import com.borgpharmacy.pro.core.database.entity.*
+import kotlinx.coroutines.flow.Flow
+@Dao interface FacilityDao { @Query("SELECT * FROM facility_profiles LIMIT 1") fun observe():Flow<FacilityProfileEntity?>; @Query("SELECT * FROM facility_profiles LIMIT 1") suspend fun get():FacilityProfileEntity?; @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun upsert(v:FacilityProfileEntity) }
+@Dao interface CompanyDao { @Query("SELECT * FROM companies WHERE tenantId=:tenant AND isDeleted=0 ORDER BY name") fun observe(tenant:String):Flow<List<CompanyEntity>>; @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun upsertAll(v:List<CompanyEntity>) }
+@Dao interface RepresentativeDao { @Query("SELECT * FROM representatives WHERE tenantId=:tenant AND isDeleted=0 ORDER BY name") fun observe(tenant:String):Flow<List<RepresentativeEntity>>; @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun upsert(v:RepresentativeEntity) }
+@Dao interface VisitDao { @Query("SELECT * FROM visits WHERE tenantId=:tenant AND isDeleted=0 ORDER BY date,shift,slotIndex") fun observe(tenant:String):Flow<List<VisitEntity>>; @Query("SELECT * FROM visits WHERE tenantId=:tenant AND cycleStart=:cycle AND isDeleted=0") suspend fun list(tenant:String,cycle:Long):List<VisitEntity>; @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun upsertAll(v:List<VisitEntity>); @Query("UPDATE visits SET isDeleted=1 WHERE id IN (:ids)") suspend fun softDelete(ids:List<String>) }
+@Dao interface PrintLogDao { @Insert suspend fun insert(v:PrintLogEntity) }
+@Dao interface UserDao { @Query("SELECT * FROM users WHERE tenantId=:tenant AND username=:username LIMIT 1") suspend fun find(tenant:String,username:String):UserEntity?; @Insert(onConflict=OnConflictStrategy.REPLACE) suspend fun upsert(v:UserEntity) }

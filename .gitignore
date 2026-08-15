@@ -8,6 +8,7 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+.release-credentials.local
 captures/
 .externalNativeBuild/
 .cxx/

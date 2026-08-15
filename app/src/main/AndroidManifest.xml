@@ -20,7 +20,7 @@
     </queries>
 
     <application
-        android:name=".BorgPharmacyApplication"
+        android:name="com.borgpharmacy.pro.BorgAppApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -39,7 +39,7 @@
         </provider>
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.borgpharmacy.pro.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

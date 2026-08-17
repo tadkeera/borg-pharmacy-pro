@@ -50,6 +50,14 @@ android {
     }
     buildTypes {
         debug { applicationIdSuffix = ".debug"; versionNameSuffix = "-debug" }
+        create("staging") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".staging"
+            versionNameSuffix = "-staging"
+            matchingFallbacks += listOf("debug")
+            buildConfigField("String", "SUPABASE_URL", buildConfigString(propertyOrEnv("SUPABASE_STAGING_URL", "https://staging-placeholder.supabase.co")))
+            buildConfigField("String", "SUPABASE_ANON_KEY", buildConfigString(propertyOrEnv("SUPABASE_STAGING_ANON_KEY", "staging-placeholder-anon-key")))
+        }
         release {
             isMinifyEnabled = false
             isShrinkResources = false

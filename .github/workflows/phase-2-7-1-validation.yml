@@ -1,0 +1,219 @@
+name: Phase 2.7.1 Production Validation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase-2-7-1-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # These are repository/environment secrets. Never commit Supabase service-role credentials.
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+  SUPABASE_SYNC_TOKEN: ${{ secrets.SUPABASE_SYNC_TOKEN }}
+
+jobs:
+  compile-unit-build:
+    name: Compile, unit tests, and debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x ./gradlew
+
+      - name: Compile Kotlin
+        run: ./gradlew compileDebugKotlin --no-daemon --stacktrace
+
+      - name: Run unit tests
+        run: ./gradlew test --no-daemon --stacktrace
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-2-7-1-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
+
+      - name: Upload Gradle reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-2-7-1-build-and-unit-test-reports
+          path: |
+            **/build/reports/**
+            **/build/test-results/**
+          if-no-files-found: warn
+
+  instrumentation:
+    name: Android instrumentation and Room migration tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Run connected Android tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: Pixel 2
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          script: ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
+
+      - name: Upload instrumentation reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-2-7-1-instrumentation-reports
+          path: |
+            **/build/reports/androidTests/**
+            **/build/outputs/androidTest-results/**
+            **/build/outputs/connected_android_test_additional_output/**
+          if-no-files-found: warn
+
+  supabase-staging-security:
+    name: Staging Supabase tenant isolation
+    runs-on: ubuntu-latest
+    # SUPABASE_DB_URL must be configured as a GitHub Actions secret for this job.
+    # It must point to a disposable staging database, never production.
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate staging secret is present
+        run: |
+          test -n "$SUPABASE_DB_URL" || {
+            echo "SUPABASE_DB_URL is not configured; refusing to run SQL against an unknown database."
+            exit 1
+          }
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+
+      - name: Apply Phase 2.7.1 security migration
+        env:
+          PGSSLMODE: require
+        run: |
+          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 \
+            --file supabase/2026_08_phase_2_7_1_security_foundation.sql
+
+      - name: Create disposable authenticated tenant fixtures
+        env:
+          PGSSLMODE: require
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          test -n "$SUPABASE_SERVICE_ROLE_KEY" || { echo "SUPABASE_SERVICE_ROLE_KEY is required for disposable fixture users"; exit 1; }
+          USER_A_EMAIL="phase271-a-${GITHUB_RUN_ID}@example.invalid"
+          USER_B_EMAIL="phase271-b-${GITHUB_RUN_ID}@example.invalid"
+          PASSWORD="Phase271-${GITHUB_RUN_ID}-StrongPassword!"
+          create_user() {
+            curl --fail-with-body --silent --show-error \
+              -X POST "$SUPABASE_URL/auth/v1/admin/users" \
+              -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+              -H "Content-Type: application/json" \
+              --data "{\"email\":\"$1\",\"password\":\"$PASSWORD\",\"email_confirm\":true}" | jq -r '.id'
+          }
+          USER_A_ID="$(create_user "$USER_A_EMAIL")"
+          USER_B_ID="$(create_user "$USER_B_EMAIL")"
+          test -n "$USER_A_ID" -a -n "$USER_B_ID"
+          echo "USER_A_ID=$USER_A_ID" >> "$GITHUB_ENV"
+          echo "USER_B_ID=$USER_B_ID" >> "$GITHUB_ENV"
+          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 \
+            --variable user_a_id="$USER_A_ID" --variable user_b_id="$USER_B_ID" <<'SQL'
+          insert into public.tenants(id,name,slug) values
+            ('00000000-0000-0000-0000-00000000000a','Phase 2.7.1 Tenant A','phase271-a')
+            on conflict(id) do update set name=excluded.name;
+          insert into public.tenants(id,name,slug) values
+            ('00000000-0000-0000-0000-00000000000b','Phase 2.7.1 Tenant B','phase271-b')
+            on conflict(id) do update set name=excluded.name;
+          insert into public.user_profiles(user_id,tenant_id,display_name,role,active)
+            values (:'user_a_id','00000000-0000-0000-0000-00000000000a','Phase Test A','ADMIN',true)
+            on conflict(user_id) do update set tenant_id=excluded.tenant_id,role='ADMIN',active=true;
+          insert into public.user_profiles(user_id,tenant_id,display_name,role,active)
+            values (:'user_b_id','00000000-0000-0000-0000-00000000000b','Phase Test B','ADMIN',true)
+            on conflict(user_id) do update set tenant_id=excluded.tenant_id,role='ADMIN',active=true;
+          insert into public.companies(id,tenant_id,name,tier,created_at,updated_at)
+            values ('10000000-0000-0000-0000-00000000000a','00000000-0000-0000-0000-00000000000a','Tenant A Fixture','UNRATED',0,0)
+            on conflict(id) do nothing;
+          insert into public.companies(id,tenant_id,name,tier,created_at,updated_at)
+            values ('10000000-0000-0000-0000-00000000000b','00000000-0000-0000-0000-00000000000b','Tenant B Fixture','UNRATED',0,0)
+            on conflict(id) do nothing;
+          SQL
+
+      - name: Execute tenant isolation regression test
+        env:
+          PGSSLMODE: require
+        run: |
+          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 \
+            --variable user_a_id="$USER_A_ID" \
+            --file supabase/tests/tenant_isolation.sql
+
+      - name: Delete disposable fixture users
+        if: always()
+        env:
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          if [ -n "${USER_A_ID:-}" ]; then curl --fail-with-body --silent --show-error -X DELETE "$SUPABASE_URL/auth/v1/admin/users/$USER_A_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" || true; fi
+          if [ -n "${USER_B_ID:-}" ]; then curl --fail-with-body --silent --show-error -X DELETE "$SUPABASE_URL/auth/v1/admin/users/$USER_B_ID" -H "apikey: $SUPABASE_SERVICE_ROLE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" || true; fi
+
+      - name: Upload SQL test log
+        if: always()
+        run: |
+          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=0 \
+            --file supabase/tests/tenant_isolation.sql > supabase-tenant-isolation.log 2>&1 || true
+
+      - name: Upload Supabase verification log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-2-7-1-supabase-security-report
+          path: supabase-tenant-isolation.log
+          if-no-files-found: warn

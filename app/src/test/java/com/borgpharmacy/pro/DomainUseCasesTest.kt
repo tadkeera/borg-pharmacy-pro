@@ -17,7 +17,7 @@ import org.junit.Test
 
 class DomainUseCasesTest {
     @Test
-    fun rejectsBlankTenantBeforeRepositoryCall() {
+    fun rejectsBlankTenantBeforeRepositoryCall() = runBlocking {
         val repository = RecordingRepository()
         assertIllegalArgument { ObserveCompaniesUseCase(repository)(" ") }
         assertEquals(0, repository.companyCalls)
@@ -43,7 +43,7 @@ class DomainUseCasesTest {
         assertTrue(!repository.reconcileCalled)
     }
 
-    private fun assertIllegalArgument(block: () -> Unit) {
+    private suspend fun assertIllegalArgument(block: suspend () -> Unit) {
         try {
             block()
             throw AssertionError("Expected IllegalArgumentException")

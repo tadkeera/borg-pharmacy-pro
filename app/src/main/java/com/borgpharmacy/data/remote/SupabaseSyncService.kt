@@ -13,7 +13,6 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
@@ -25,7 +24,7 @@ import java.net.URLEncoder
 /**
  * Offline-first sync adapter.
  *
- * Writes are RPC protected by SUPABASE_SYNC_TOKEN.
+ * Sensitive writes are disabled here; use an authenticated Edge Function instead.
  * Pulls are explicitly filtered by tenant_id + active flags to prevent stale/deleted cloud rows
  * from corrupting the local Room database after a catalog replacement.
  */
@@ -43,6 +42,15 @@ class SupabaseSyncService {
         json.decodeFromString<AuthTokenResponseDto>(response).toDomain()
     }
 
+    suspend fun refreshSession(refreshToken: String): SupabaseAuthSession = withContext(Dispatchers.IO) {
+        require(refreshToken.isNotBlank()) { "refresh token is required" }
+        val response = postAuth(
+            path = "token?grant_type=refresh_token",
+            body = buildJsonObject { put("refresh_token", refreshToken) },
+        )
+        json.decodeFromString<AuthTokenResponseDto>(response).toDomain()
+    }
+
     suspend fun fetchProfile(accessToken: String, userId: String): UserProfileRemoteDto? = withContext(Dispatchers.IO) {
         val encodedUserId = enc(userId)
         val response = getRest(
@@ -52,37 +60,41 @@ class SupabaseSyncService {
         json.decodeFromString<List<UserProfileRemoteDto>>(response).firstOrNull()
     }
 
-    suspend fun pushCompanies(companies: List<CompanyEntity>) {
-        if (companies.isEmpty()) return
-        postSyncRpc("borg_sync_companies", json.encodeToJsonElement(companies.map { it.toRemote() }))
-    }
+    /**
+     * The client must never write through a shared secret embedded in the APK.
+     * These legacy methods remain as compile-time migration guards and fail closed.
+     */
+    @Deprecated("Use an authenticated Edge Function with tenant and role checks")
+    suspend fun pushCompanies(companies: List<CompanyEntity>) = failClosed("pushCompanies")
 
-    suspend fun pushRepresentatives(representatives: List<RepresentativeEntity>) {
-        if (representatives.isEmpty()) return
-        postSyncRpc("borg_sync_representatives", json.encodeToJsonElement(representatives.map { it.toRemote() }))
-    }
+    @Deprecated("Use an authenticated Edge Function with tenant and role checks")
+    suspend fun pushRepresentatives(representatives: List<RepresentativeEntity>) = failClosed("pushRepresentatives")
 
-    suspend fun pushVisits(visits: List<VisitEntity>) {
-        if (visits.isEmpty()) return
-        postSyncRpc("borg_sync_visits", json.encodeToJsonElement(visits.map { it.toRemote() }))
-    }
+    @Deprecated("Use an authenticated Edge Function with tenant and role checks")
+    suspend fun pushVisits(visits: List<VisitEntity>) = failClosed("pushVisits")
 
-    suspend fun pushUsers(users: List<UserEntity>) {
-        if (users.isEmpty()) return
-        postSyncRpc("borg_sync_users", json.encodeToJsonElement(users.map { it.toRemote() }))
-    }
+    @Deprecated("Use an authenticated Edge Function with tenant and role checks")
+    suspend fun pushUsers(users: List<UserEntity>) = failClosed("pushUsers")
 
-    suspend fun loginUser(username: String, passcodeHash: String): UserEntity? {
-        val response = postRpc(
-            functionName = "borg_login_user",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_username", username.trim().lowercase())
-                put("p_passcode_hash", passcodeHash)
-            },
-            preferReturnMinimal = false,
+    @Deprecated("Use Supabase Auth sign-in and fetchProfile")
+    suspend fun loginUser(username: String, passcodeHash: String): UserEntity? = failClosed("loginUser")
+
+    private suspend fun failClosed(operation: String): Nothing = throw SecurityException(
+        "Legacy unauthenticated RPC disabled: $operation"
+    )
+
+    suspend fun pushSecureOperations(
+        accessToken: String,
+        operations: List<SecureSyncOperationDto>,
+    ): SecureSyncResponseDto = withContext(Dispatchers.IO) {
+        require(accessToken.isNotBlank()) { "access token is required" }
+        require(operations.isNotEmpty() && operations.size <= 100) { "sync batch must contain 1..100 operations" }
+        val response = postFunction(
+            functionName = "secure-sync",
+            accessToken = accessToken,
+            body = buildJsonObject { put("operations", json.encodeToJsonElement(operations)) },
         )
-        return json.decodeFromString<List<UserRemoteDto>>(response).firstOrNull()?.toEntity()
+        json.decodeFromString<SecureSyncResponseDto>(response)
     }
 
     suspend fun adminCreateAuthUser(
@@ -118,7 +130,7 @@ class SupabaseSyncService {
             // مهم: صفحة الويب القديمة ربما سجلت المندوب tenant_id فارغ/قديم.
             // نسحب المندوبين النشطين ثم نقبل فقط من company_id تابع لشركات هذا الـ tenant ونطبع tenantId محلياً.
             json.decodeFromString<List<RepresentativeRemoteDto>>(
-                getRest("representatives?select=*&is_deleted=eq.false&deleted_at=is.null&order=updated_at.asc")
+                getRest("representatives?select=*&$activeFilter&order=updated_at.asc")
             ).map { it.toEntity() }
                 .filter { it.companyId in activeCompanyIds }
                 .map { if (it.tenantId == tenantId) it else it.copy(tenantId = tenantId) }
@@ -130,85 +142,22 @@ class SupabaseSyncService {
         RemoteSnapshot(companies, reps, visits, users)
     }
 
-    suspend fun pruneTenantToActiveCompanies(tenantId: String, activeCompanyIds: List<String>) {
-        postRpc(
-            functionName = "borg_prune_tenant_to_companies",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_tenant_id", tenantId)
-                put("p_company_ids", json.encodeToJsonElement(activeCompanyIds))
-            },
-            preferReturnMinimal = true,
-        )
-    }
+    @Deprecated("Use an authenticated Edge Function with server-side tenant checks")
+    suspend fun pruneTenantToActiveCompanies(tenantId: String, activeCompanyIds: List<String>) = failClosed("pruneTenantToActiveCompanies")
 
-    suspend fun repairRepresentativeCompanyLinks(tenantId: String) {
-        postRpc(
-            functionName = "borg_repair_representative_company_links",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_tenant_id", tenantId)
-            },
-            preferReturnMinimal = true,
-        )
-    }
+    @Deprecated("Use an authenticated Edge Function with server-side tenant checks")
+    suspend fun repairRepresentativeCompanyLinks(tenantId: String) = failClosed("repairRepresentativeCompanyLinks")
 
-    suspend fun moveRepresentative(repId: String, targetCompanyId: String) {
-        postRpc(
-            functionName = "borg_move_representative",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_representative_id", repId)
-                put("p_target_company_id", targetCompanyId)
-            },
-            preferReturnMinimal = true,
-        )
-    }
+    @Deprecated("Use an authenticated Edge Function with server-side tenant checks")
+    suspend fun moveRepresentative(repId: String, targetCompanyId: String) = failClosed("moveRepresentative")
 
-    suspend fun hardDeleteRepresentative(repId: String) {
-        postRpc(
-            functionName = "borg_delete_representative_forever",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_representative_id", repId)
-            },
-            preferReturnMinimal = true,
-        )
-    }
+    @Deprecated("Hard delete is disabled from the Android client")
+    suspend fun hardDeleteRepresentative(repId: String) = failClosed("hardDeleteRepresentative")
 
-    suspend fun hardDeleteCompany(companyId: String) {
-        postRpc(
-            functionName = "borg_delete_company_forever",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_company_id", companyId)
-            },
-            preferReturnMinimal = true,
-        )
-    }
+    @Deprecated("Hard delete is disabled from the Android client")
+    suspend fun hardDeleteCompany(companyId: String) = failClosed("hardDeleteCompany")
 
-    private suspend fun pullUsers(tenantId: String): List<UserEntity> {
-        val response = postRpc(
-            functionName = "borg_pull_users",
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_tenant_id", tenantId)
-            },
-            preferReturnMinimal = false,
-        )
-        return json.decodeFromString<List<UserRemoteDto>>(response).map { it.toEntity() }
-    }
-
-    private suspend fun postSyncRpc(functionName: String, rows: JsonElement) {
-        postRpc(
-            functionName = functionName,
-            body = buildJsonObject {
-                put("p_token", BuildConfig.SUPABASE_SYNC_TOKEN)
-                put("p_rows", rows)
-            },
-            preferReturnMinimal = true,
-        )
-    }
+    private suspend fun pullUsers(tenantId: String): List<UserEntity> = failClosed("pullUsers")
 
     private suspend fun getRest(path: String, bearer: String = BuildConfig.SUPABASE_ANON_KEY): String = withContext(Dispatchers.IO) {
         val connection = (URL("${BuildConfig.SUPABASE_URL}/rest/v1/$path").openConnection() as HttpURLConnection).apply {
@@ -249,21 +198,6 @@ class SupabaseSyncService {
         readResponse(connection, "Function $functionName")
     }
 
-    private suspend fun postRpc(functionName: String, body: JsonObject, preferReturnMinimal: Boolean): String = withContext(Dispatchers.IO) {
-        val connection = (URL("${BuildConfig.SUPABASE_URL}/rest/v1/rpc/$functionName").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 30_000
-            readTimeout = 30_000
-            doOutput = true
-            setRequestProperty("apikey", BuildConfig.SUPABASE_ANON_KEY)
-            setRequestProperty("Authorization", "Bearer ${BuildConfig.SUPABASE_ANON_KEY}")
-            setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            if (preferReturnMinimal) setRequestProperty("Prefer", "return=minimal")
-        }
-        writeJson(connection, body)
-        readResponse(connection, "RPC $functionName")
-    }
-
     private fun writeJson(connection: HttpURLConnection, body: JsonObject) {
         val bytes = json.encodeToString(JsonObject.serializer(), body).toByteArray(Charsets.UTF_8)
         connection.outputStream.use { it.write(bytes) }
@@ -284,13 +218,41 @@ class SupabaseSyncService {
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 }
 
+@Serializable
+data class SecureSyncOperationDto(
+    @SerialName("idempotencyKey") val idempotencyKey: String,
+    val operation: String,
+    val entityType: String,
+    val entityId: String,
+    val payload: JsonObject,
+    val version: Long,
+)
+
+@Serializable
+data class SecureSyncResponseDto(
+    val tenantId: String,
+    val accepted: List<SecureSyncAcceptedDto> = emptyList(),
+)
+
+@Serializable
+data class SecureSyncAcceptedDto(
+    val idempotencyKey: String,
+    val entityType: String,
+    val entityId: String,
+    val version: Long,
+)
+
 data class SupabaseAuthSession(
     val accessToken: String,
     val refreshToken: String,
     val expiresIn: Long,
+    val expiresAtEpochSeconds: Long,
     val userId: String,
     val email: String,
-)
+) {
+    fun isExpired(nowEpochSeconds: Long = System.currentTimeMillis() / 1000): Boolean =
+        expiresAtEpochSeconds <= nowEpochSeconds + 60
+}
 
 @Serializable
 data class AuthTokenResponseDto(
@@ -299,7 +261,17 @@ data class AuthTokenResponseDto(
     @SerialName("expires_in") val expiresIn: Long = 0,
     val user: AuthUserDto,
 ) {
-    fun toDomain(): SupabaseAuthSession = SupabaseAuthSession(accessToken, refreshToken, expiresIn, user.id, user.email.orEmpty())
+    fun toDomain(): SupabaseAuthSession {
+        val now = System.currentTimeMillis() / 1000
+        return SupabaseAuthSession(
+            accessToken = accessToken,
+            refreshToken = refreshToken,
+            expiresIn = expiresIn,
+            expiresAtEpochSeconds = now + expiresIn,
+            userId = user.id,
+            email = user.email.orEmpty(),
+        )
+    }
 }
 
 @Serializable

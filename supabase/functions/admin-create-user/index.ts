@@ -14,7 +14,7 @@ type CreateUserPayload = {
   email: string;
   password: string;
   displayName: string;
-  role: "ADMIN" | "PHARMACIST";
+  role: "OWNER" | "ADMIN" | "PHARMACIST" | "EMPLOYEE" | "REPRESENTATIVE" | "VIEWER";
 };
 
 Deno.serve(async (req) => {
@@ -41,22 +41,27 @@ Deno.serve(async (req) => {
 
     const { data: callerProfile, error: profileError } = await admin
       .from("user_profiles")
-      .select("tenant_id, role, active")
+      .select("tenant_id, role_v2, role, active")
       .eq("user_id", callerData.user.id)
       .single();
 
-    if (profileError || !callerProfile?.active || callerProfile.role !== "ADMIN") {
-      return json({ error: "Only active ADMIN can create users" }, 403);
+    const callerRole = String(callerProfile?.role_v2 ?? callerProfile?.role ?? "VIEWER").toUpperCase();
+    if (profileError || !callerProfile?.active || !["OWNER", "ADMIN"].includes(callerRole)) {
+      return json({ error: "Only active OWNER or ADMIN can create users" }, 403);
     }
 
     const payload = (await req.json()) as CreateUserPayload;
     const email = (payload.email || "").trim().toLowerCase();
     const password = payload.password || "";
     const displayName = (payload.displayName || email).trim();
-    const role = payload.role === "ADMIN" ? "ADMIN" : "PHARMACIST";
+    const allowedRoles = ["OWNER", "ADMIN", "PHARMACIST", "EMPLOYEE", "REPRESENTATIVE", "VIEWER"] as const;
+    const role = allowedRoles.includes(payload.role) ? payload.role : "VIEWER";
+    if (role === "OWNER" && callerRole !== "OWNER") {
+      return json({ error: "Only OWNER can create another OWNER" }, 403);
+    }
 
-    if (!email || password.length < 6) {
-      return json({ error: "Email and password >= 6 chars are required" }, 400);
+    if (!email || password.length < 12) {
+      return json({ error: "Email and password >= 12 chars are required" }, 400);
     }
 
     const { data: created, error: createError } = await admin.auth.admin.createUser({
@@ -79,6 +84,7 @@ Deno.serve(async (req) => {
       tenant_id: callerProfile.tenant_id,
       display_name: displayName,
       role,
+      role_v2: role,
       active: true,
       must_change_password: false,
       updated_at: new Date().toISOString(),

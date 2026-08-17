@@ -33,7 +33,6 @@ android {
         vectorDrawables.useSupportLibrary = true
         buildConfigField("String", "SUPABASE_URL", buildConfigString(propertyOrEnv("SUPABASE_URL", "https://placeholder.supabase.co")))
         buildConfigField("String", "SUPABASE_ANON_KEY", buildConfigString(propertyOrEnv("SUPABASE_ANON_KEY", "placeholder-anon-key")))
-        buildConfigField("String", "SUPABASE_SYNC_TOKEN", buildConfigString(propertyOrEnv("SUPABASE_SYNC_TOKEN", "placeholder-sync-token")))
     }
     signingConfigs {
         create("release") {
@@ -85,6 +84,8 @@ dependencies {
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
     implementation(platform("io.github.jan-tennert.supabase:bom:2.6.1"))
@@ -94,5 +95,6 @@ dependencies {
     implementation("io.ktor:ktor-client-android:2.3.12")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }

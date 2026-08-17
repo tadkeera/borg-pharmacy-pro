@@ -11,6 +11,7 @@ import com.borgpharmacy.data.local.DEFAULT_TENANT_ID
 import com.borgpharmacy.data.remote.SupabaseSyncService
 import com.borgpharmacy.data.repository.BorgRepository
 import com.borgpharmacy.data.repository.OfflineFirstBorgRepository
+import com.borgpharmacy.pro.core.security.SecureSessionStore
 import com.borgpharmacy.domain.CycleCalculator
 import com.borgpharmacy.domain.ScheduleGenerator
 
@@ -340,6 +341,7 @@ class AppContainer(private val application: Application) {
 
     val backupService: BackupService by lazy { BackupService(application, database) }
     val syncService: SupabaseSyncService by lazy { SupabaseSyncService() }
+    val secureSessionStore: SecureSessionStore by lazy { SecureSessionStore(application) }
     val cycleCalculator: CycleCalculator by lazy { CycleCalculator() }
     val scheduleGenerator: ScheduleGenerator by lazy { ScheduleGenerator(cycleCalculator) }
     val repository: BorgRepository by lazy {
@@ -347,6 +349,7 @@ class AppContainer(private val application: Application) {
             db = database,
             backupService = backupService,
             syncService = syncService,
+            secureSessionStore = secureSessionStore,
             scheduleGenerator = scheduleGenerator,
             cycleCalculator = cycleCalculator,
         )

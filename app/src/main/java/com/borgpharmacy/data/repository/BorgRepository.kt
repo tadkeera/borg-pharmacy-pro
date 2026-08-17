@@ -16,6 +16,8 @@ import com.borgpharmacy.data.local.toDomain
 import com.borgpharmacy.data.local.toEntity
 import com.borgpharmacy.data.remote.SupabaseClientProvider
 import com.borgpharmacy.data.remote.SupabaseSyncService
+import com.borgpharmacy.pro.core.security.SecureSessionStore
+import com.borgpharmacy.pro.core.security.SessionSnapshot
 import com.borgpharmacy.domain.Company
 import com.borgpharmacy.domain.CompanyReportScore
 import com.borgpharmacy.domain.CycleCalculator
@@ -121,18 +123,22 @@ private const val SESSION_USER_ID_KEY = "session_user_id"
 private const val AUTH_ACCESS_TOKEN_KEY = "auth_access_token"
 private const val AUTH_REFRESH_TOKEN_KEY = "auth_refresh_token"
 private const val AUTH_TENANT_ID_KEY = "auth_tenant_id"
+private const val AUTH_EXPIRES_AT_KEY = "auth_expires_at_epoch_seconds"
 
 class OfflineFirstBorgRepository(
     private val db: BorgDatabase,
     private val backupService: BackupService,
     private val syncService: SupabaseSyncService,
+    private val secureSessionStore: SecureSessionStore,
     private val scheduleGenerator: ScheduleGenerator = ScheduleGenerator(),
     private val cycleCalculator: CycleCalculator = CycleCalculator(),
 ) : BorgRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private suspend fun getActiveTenantId(): String =
-        db.appSettingsDao().getValue(AUTH_TENANT_ID_KEY)?.takeIf { it.isNotBlank() } ?: DEFAULT_TENANT_ID
+        secureSessionStore.read()?.tenantId
+            ?: db.appSettingsDao().getValue(AUTH_TENANT_ID_KEY)?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_TENANT_ID
 
     private suspend fun currentSessionUser(): UserEntity? {
         val userId = db.appSettingsDao().getValue(SESSION_USER_ID_KEY)?.takeIf { it.isNotBlank() } ?: return null
@@ -209,7 +215,7 @@ class OfflineFirstBorgRepository(
                 isDeleted = false,
             )
             db.userDao().upsert(entity)
-            saveAuthSession(entity.id, session.accessToken, session.refreshToken, profile.tenantId)
+            saveAuthSession(entity.id, session.accessToken, session.refreshToken, session.expiresAtEpochSeconds, profile.tenantId)
             entity
         }.onFailure { throwable ->
             Log.w("BorgLogin", "Supabase Auth login failed; falling back to legacy login", throwable)
@@ -241,25 +247,66 @@ class OfflineFirstBorgRepository(
     override suspend fun restoreSavedSession(): UserAccount? {
         val userId = db.appSettingsDao().getValue(SESSION_USER_ID_KEY)?.takeIf { it.isNotBlank() } ?: return null
         val user = db.userDao().getById(userId) ?: return null
-        return if (user.mustChangePasscode) null else user.toDomain()
+        if (user.mustChangePasscode) return null
+        if (!refreshAuthSessionIfNeeded()) {
+            clearSavedSession()
+            return null
+        }
+        return user.toDomain()
     }
 
     override suspend fun clearSavedSession() {
         db.appSettingsDao().set(AppSettingEntity(SESSION_USER_ID_KEY, ""))
+        secureSessionStore.clear()
+        // Remove tokens left by pre-hardening releases.
         db.appSettingsDao().set(AppSettingEntity(AUTH_ACCESS_TOKEN_KEY, ""))
         db.appSettingsDao().set(AppSettingEntity(AUTH_REFRESH_TOKEN_KEY, ""))
         db.appSettingsDao().set(AppSettingEntity(AUTH_TENANT_ID_KEY, ""))
+        db.appSettingsDao().set(AppSettingEntity(AUTH_EXPIRES_AT_KEY, ""))
     }
 
     private suspend fun saveSession(userId: String) {
         db.appSettingsDao().set(AppSettingEntity(SESSION_USER_ID_KEY, userId))
     }
 
-    private suspend fun saveAuthSession(userId: String, accessToken: String, refreshToken: String, tenantId: String) {
+    private suspend fun saveAuthSession(
+        userId: String,
+        accessToken: String,
+        refreshToken: String,
+        expiresAtEpochSeconds: Long,
+        tenantId: String,
+    ) {
         saveSession(userId)
-        db.appSettingsDao().set(AppSettingEntity(AUTH_ACCESS_TOKEN_KEY, accessToken))
-        db.appSettingsDao().set(AppSettingEntity(AUTH_REFRESH_TOKEN_KEY, refreshToken))
-        db.appSettingsDao().set(AppSettingEntity(AUTH_TENANT_ID_KEY, tenantId))
+        secureSessionStore.save(
+            SessionSnapshot(
+                accessToken = accessToken,
+                refreshToken = refreshToken,
+                userId = userId,
+                tenantId = tenantId,
+                expiresAtEpochSeconds = expiresAtEpochSeconds,
+            ),
+        )
+    }
+
+    private suspend fun refreshAuthSessionIfNeeded(): Boolean {
+        val session = secureSessionStore.read() ?: return false
+        if (!session.isExpired()) return true
+
+        return runCatching {
+            val refreshed = syncService.refreshSession(session.refreshToken)
+            secureSessionStore.save(
+                session.copy(
+                    accessToken = refreshed.accessToken,
+                    refreshToken = refreshed.refreshToken,
+                    expiresAtEpochSeconds = refreshed.expiresAtEpochSeconds,
+                ),
+            )
+        }.isSuccess
+    }
+
+    private suspend fun validAccessToken(): String? {
+        if (!refreshAuthSessionIfNeeded()) return null
+        return secureSessionStore.read()?.accessToken?.takeIf { it.isNotBlank() }
     }
 
     override suspend fun changePasscode(userId: String, newPasscode: String) {
@@ -277,7 +324,7 @@ class OfflineFirstBorgRepository(
         if (cleanEmail.isBlank()) return
         val cleanDisplayName = displayName.trim().ifBlank { cleanEmail }
         val passcodeHash = SecurityHasher.hashPasscode(passcode)
-        val accessToken = db.appSettingsDao().getValue(AUTH_ACCESS_TOKEN_KEY).orEmpty()
+        val accessToken = validAccessToken().orEmpty()
 
         // المرحلة الجديدة: إنشاء المستخدم في Supabase Auth عبر Edge Function آمنة يستدعيها الأدمن فقط.
         val authCreated = if (accessToken.isNotBlank()) {

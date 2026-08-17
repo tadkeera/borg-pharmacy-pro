@@ -141,7 +141,11 @@ jobs:
         env:
           PGSSLMODE: require
         run: |
-          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 \
+          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+          test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST"; exit 1; }
+          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --file supabase/2026_08_phase_2_7_1_security_foundation.sql
 
       - name: Create disposable authenticated tenant fixtures
@@ -166,7 +170,11 @@ jobs:
           test -n "$USER_A_ID" -a -n "$USER_B_ID"
           echo "USER_A_ID=$USER_A_ID" >> "$GITHUB_ENV"
           echo "USER_B_ID=$USER_B_ID" >> "$GITHUB_ENV"
-          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 \
+          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+          test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST"; exit 1; }
+          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --variable user_a_id="$USER_A_ID" --variable user_b_id="$USER_B_ID" <<'SQL'
           insert into public.tenants(id,name,slug) values
             ('00000000-0000-0000-0000-00000000000a','Phase 2.7.1 Tenant A','phase271-a')
@@ -192,7 +200,11 @@ jobs:
         env:
           PGSSLMODE: require
         run: |
-          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 \
+          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+          test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST"; exit 1; }
+          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --variable user_a_id="$USER_A_ID" \
             --file supabase/tests/tenant_isolation.sql
 
@@ -207,7 +219,10 @@ jobs:
       - name: Upload SQL test log
         if: always()
         run: |
-          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=0 \
+          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          psql "$PSQL_URL" --set ON_ERROR_STOP=0 \
             --file supabase/tests/tenant_isolation.sql > supabase-tenant-isolation.log 2>&1 || true
 
       - name: Upload Supabase verification log

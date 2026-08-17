@@ -236,6 +236,7 @@ jobs:
           fi
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --variable user_a_id="$USER_A_ID" \
+            --variable user_b_id="$USER_B_ID" \
             --file supabase/tests/tenant_isolation.sql
 
       - name: Delete disposable fixture users

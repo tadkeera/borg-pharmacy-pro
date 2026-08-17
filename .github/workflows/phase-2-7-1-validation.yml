@@ -123,6 +123,7 @@ jobs:
     # It must point to a disposable staging database, never production.
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_URL_POOLER: ${{ secrets.SUPABASE_DB_URL_POOLER }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -141,10 +142,14 @@ jobs:
         env:
           PGSSLMODE: require
         run: |
-          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
-          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
-          test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST"; exit 1; }
-          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          if [ -n "$SUPABASE_DB_URL_POOLER" ]; then
+            PSQL_URL="$SUPABASE_DB_URL_POOLER"
+          else
+            DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+            DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+            test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST and no pooler URL is configured"; exit 1; }
+            PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          fi
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --file supabase/2026_08_phase_2_7_1_security_foundation.sql
 
@@ -170,10 +175,14 @@ jobs:
           test -n "$USER_A_ID" -a -n "$USER_B_ID"
           echo "USER_A_ID=$USER_A_ID" >> "$GITHUB_ENV"
           echo "USER_B_ID=$USER_B_ID" >> "$GITHUB_ENV"
-          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
-          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
-          test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST"; exit 1; }
-          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          if [ -n "$SUPABASE_DB_URL_POOLER" ]; then
+            PSQL_URL="$SUPABASE_DB_URL_POOLER"
+          else
+            DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+            DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+            test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST and no pooler URL is configured"; exit 1; }
+            PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          fi
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --variable user_a_id="$USER_A_ID" --variable user_b_id="$USER_B_ID" <<'SQL'
           insert into public.tenants(id,name,slug) values
@@ -200,10 +209,14 @@ jobs:
         env:
           PGSSLMODE: require
         run: |
-          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
-          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
-          test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST"; exit 1; }
-          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          if [ -n "$SUPABASE_DB_URL_POOLER" ]; then
+            PSQL_URL="$SUPABASE_DB_URL_POOLER"
+          else
+            DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+            DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+            test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST and no pooler URL is configured"; exit 1; }
+            PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          fi
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --variable user_a_id="$USER_A_ID" \
             --file supabase/tests/tenant_isolation.sql
@@ -219,9 +232,13 @@ jobs:
       - name: Upload SQL test log
         if: always()
         run: |
-          DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
-          DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
-          PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          if [ -n "$SUPABASE_DB_URL_POOLER" ]; then
+            PSQL_URL="$SUPABASE_DB_URL_POOLER"
+          else
+            DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"
+            DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"
+            PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
+          fi
           psql "$PSQL_URL" --set ON_ERROR_STOP=0 \
             --file supabase/tests/tenant_isolation.sql > supabase-tenant-isolation.log 2>&1 || true
 

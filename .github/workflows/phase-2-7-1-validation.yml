@@ -150,6 +150,9 @@ jobs:
             test -n "$DB_IPV4" || { echo "No IPv4 address found for $DB_HOST and no pooler URL is configured"; exit 1; }
             PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"
           fi
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --file supabase/schema.sql
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --file supabase/2026_07_multi_tenant_offline_sync.sql
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --file supabase/2026_07_auth_user_profiles.sql
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --file supabase/2026_08_phase_2_7_1_security_foundation.sql
 

@@ -1,34 +1,31 @@
 package com.borgpharmacy.pro.data.repository
 
-import com.borgpharmacy.pro.core.database.dao.CompanyDao
-import com.borgpharmacy.pro.core.database.dao.SyncQueueDao
-import com.borgpharmacy.pro.core.database.dao.VisitDao
 import com.borgpharmacy.pro.core.database.entity.SyncQueueEntity
 import com.borgpharmacy.pro.core.database.entity.VisitEntity
+import com.borgpharmacy.pro.data.local.BorgLocalDataSource
 import com.borgpharmacy.pro.domain.model.Company
 import com.borgpharmacy.pro.domain.model.CyclePolicy
 import com.borgpharmacy.pro.domain.model.Shift
 import com.borgpharmacy.pro.domain.model.Visit
 import com.borgpharmacy.pro.domain.repository.BorgRepository
 import com.borgpharmacy.pro.domain.scheduler.DynamicScheduleEngine
+import com.borgpharmacy.pro.domain.validation.DomainValidators
 import java.time.LocalDate
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 class OfflineFirstBorgRepository(
-    private val companiesDao: CompanyDao,
-    private val visitsDao: VisitDao,
-    private val queueDao: SyncQueueDao,
+    private val localDataSource: BorgLocalDataSource,
     private val engine: DynamicScheduleEngine = DynamicScheduleEngine(),
 ) : BorgRepository {
-    override fun companies(tenant: String) = companiesDao.observe(tenant).map { rows ->
+    override fun companies(tenant: String) = localDataSource.observeCompanies(DomainValidators.tenantId(tenant)).map { rows ->
         rows.map { company ->
             Company(company.id, company.name, company.baseDay, Shift.valueOf(company.baseShift))
         }
     }
 
-    override fun visits(tenant: String) = visitsDao.observe(tenant).map { rows ->
+    override fun visits(tenant: String) = localDataSource.observeVisits(DomainValidators.tenantId(tenant)).map { rows ->
         rows.map { visit ->
             Visit(
                 visit.id,
@@ -49,8 +46,9 @@ class OfflineFirstBorgRepository(
         cycle: LocalDate,
         policy: CyclePolicy,
     ) {
-        require(tenantId.isNotBlank()) { "tenantId is required for reconciliation" }
-        val existing = visitsDao.list(tenantId, cycle.toEpochDay()).map { visit ->
+        val safeTenant = DomainValidators.tenantId(tenantId)
+        DomainValidators.company(company, policy)
+        val existing = localDataSource.listVisits(safeTenant, cycle.toEpochDay()).map { visit ->
             Visit(
                 visit.id,
                 visit.companyId,
@@ -66,7 +64,7 @@ class OfflineFirstBorgRepository(
         val generatedEntities = engine.generate(company, cycle, policy, existing).map { visit ->
             VisitEntity(
                 id = visit.id,
-                tenantId = tenantId,
+                tenantId = safeTenant,
                 companyId = visit.companyId,
                 cycleStart = visit.cycleStart.toEpochDay(),
                 week = visit.week,
@@ -78,27 +76,30 @@ class OfflineFirstBorgRepository(
                 syncVersion = version,
             )
         }
-        visitsDao.upsertAll(generatedEntities)
+        localDataSource.upsertVisits(generatedEntities)
         generatedEntities.forEach { entity ->
-            queueDao.enqueue(
+            localDataSource.enqueue(
                 SyncQueueEntity(
-                    tenantId = tenantId,
+                    tenantId = safeTenant,
                     entityType = "VISIT",
                     entityId = entity.id,
                     operation = "UPSERT",
                     payload = buildJsonObject {
                         put("id", entity.id)
-                        put("tenant_id", tenantId)
+                        put("tenant_id", safeTenant)
                         put("company_id", entity.companyId)
-                        put("cycle_start", entity.cycleStart)
-                        put("week", entity.week)
-                        put("date", entity.date)
+                        put("cycle_start_epoch_day", entity.cycleStart)
+                        put("week_of_cycle", entity.week)
+                        put("day_of_cycle", ((entity.date - entity.cycleStart).coerceIn(0L, 27L) + 1L).toInt())
+                        put("date_epoch_day", entity.date)
                         put("shift", entity.shift)
                         put("slot_index", entity.slotIndex)
+                        put("status", "SCHEDULED")
                         put("is_deleted", entity.isDeleted)
+                        put("created_at", version)
                     }.toString(),
                     version = entity.syncVersion,
-                    idempotencyKey = "$tenantId:VISIT:${entity.id}:${entity.syncVersion}",
+                    idempotencyKey = "$safeTenant:VISIT:${entity.id}:${entity.syncVersion}",
                 ),
             )
         }

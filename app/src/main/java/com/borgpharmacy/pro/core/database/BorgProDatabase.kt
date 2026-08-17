@@ -28,7 +28,7 @@ import com.borgpharmacy.pro.core.database.entity.VisitEntity
         SyncQueueEntity::class,
     ],
     version = 2,
-    exportSchema = false,
+    exportSchema = true,
 )
 abstract class BorgProDatabase : RoomDatabase() {
     abstract fun facilityDao(): FacilityDao

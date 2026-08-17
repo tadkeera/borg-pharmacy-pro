@@ -1,18 +1,18 @@
 package com.borgpharmacy.pro.core.sync
 
-import com.borgpharmacy.data.remote.SecureSyncOperationDto
-import com.borgpharmacy.data.remote.SupabaseSyncService
+import com.borgpharmacy.pro.core.security.SessionStore
+import com.borgpharmacy.pro.data.remote.ProSyncOperation
+import com.borgpharmacy.pro.data.remote.SyncRemoteDataSource
 import com.borgpharmacy.pro.core.database.dao.SyncQueueDao
 import com.borgpharmacy.pro.core.database.entity.SyncQueueEntity
-import com.borgpharmacy.pro.core.security.SecureSessionStore
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 
 class SyncManager(
     private val queueDao: SyncQueueDao,
-    private val sessionStore: SecureSessionStore,
-    private val syncService: SupabaseSyncService,
+    private val sessionStore: SessionStore,
+    private val syncService: SyncRemoteDataSource,
     private val json: Json = Json { ignoreUnknownKeys = true },
 ) {
     suspend fun sync(tenantId: String, nowMillis: Long = System.currentTimeMillis()): SyncResult {
@@ -38,12 +38,15 @@ class SyncManager(
         return try {
             val operations = pending.map { it.toRemote(json) }
             val response = syncService.pushSecureOperations(session.accessToken, operations)
-            val accepted = response.accepted.map { it.idempotencyKey }.toSet()
+            val accepted = response.accepted.associateBy { it.idempotencyKey }
+            val conflicts = response.conflicts.associateBy { it.idempotencyKey }
+            val rejected = response.rejected.associateBy { it.idempotencyKey }
             pending.forEach { entry ->
-                if (entry.idempotencyKey in accepted) {
-                    queueDao.delete(tenantId, entry.id)
-                } else {
-                    scheduleRetry(entry, tenantId, nowMillis, "operation was not accepted")
+                when {
+                    entry.idempotencyKey in accepted -> queueDao.delete(tenantId, entry.id)
+                    entry.idempotencyKey in conflicts -> markTerminal(entry, tenantId, "CONFLICT", conflicts.getValue(entry.idempotencyKey).reason)
+                    entry.idempotencyKey in rejected -> markTerminal(entry, tenantId, "FAILED", rejected.getValue(entry.idempotencyKey).reason)
+                    else -> scheduleRetry(entry, tenantId, nowMillis, "operation was not returned by server")
                 }
             }
             SyncResult.Succeeded(accepted.size)
@@ -51,6 +54,22 @@ class SyncManager(
             pending.forEach { scheduleRetry(it, tenantId, nowMillis, error.message ?: error.javaClass.simpleName) }
             SyncResult.RetryScheduled(pending.size)
         }
+    }
+
+    private suspend fun markTerminal(
+        entry: SyncQueueEntity,
+        tenantId: String,
+        status: String,
+        reason: String?,
+    ) {
+        queueDao.updateStatus(
+            tenant = tenantId,
+            id = entry.id,
+            status = status,
+            attempts = entry.attempts,
+            nextAttemptAt = Long.MAX_VALUE,
+            lastError = (reason ?: status).take(500),
+        )
     }
 
     private suspend fun scheduleRetry(
@@ -71,7 +90,7 @@ class SyncManager(
         )
     }
 
-    private fun SyncQueueEntity.toRemote(json: Json) = SecureSyncOperationDto(
+    private fun SyncQueueEntity.toRemote(json: Json) = ProSyncOperation(
         idempotencyKey = idempotencyKey,
         operation = operation,
         entityType = entityType,

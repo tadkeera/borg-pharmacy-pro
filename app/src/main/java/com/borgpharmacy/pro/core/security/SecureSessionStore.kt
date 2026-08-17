@@ -5,7 +5,13 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
 /** Stores only authentication session material; business data remains in Room. */
-class SecureSessionStore(context: Context) {
+interface SessionStore {
+    fun save(session: SessionSnapshot)
+    fun read(): SessionSnapshot?
+    fun clear()
+}
+
+class SecureSessionStore(context: Context) : SessionStore {
     private val preferences = EncryptedSharedPreferences.create(
         context,
         FILE_NAME,
@@ -16,7 +22,7 @@ class SecureSessionStore(context: Context) {
         EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
     )
 
-    fun save(session: SessionSnapshot) {
+    override fun save(session: SessionSnapshot) {
         preferences.edit()
             .putString(KEY_ACCESS_TOKEN, session.accessToken)
             .putString(KEY_REFRESH_TOKEN, session.refreshToken)
@@ -26,7 +32,7 @@ class SecureSessionStore(context: Context) {
             .apply()
     }
 
-    fun read(): SessionSnapshot? {
+    override fun read(): SessionSnapshot? {
         val access = preferences.getString(KEY_ACCESS_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return null
         val refresh = preferences.getString(KEY_REFRESH_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return null
         val userId = preferences.getString(KEY_USER_ID, null)?.takeIf { it.isNotBlank() } ?: return null
@@ -40,7 +46,7 @@ class SecureSessionStore(context: Context) {
         )
     }
 
-    fun clear() = preferences.edit().clear().apply()
+    override fun clear() = preferences.edit().clear().apply()
 
     companion object {
         private const val FILE_NAME = "borg_secure_session"

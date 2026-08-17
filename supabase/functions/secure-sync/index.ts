@@ -75,17 +75,44 @@ Deno.serve(async (req) => {
       };
     });
 
-    const { data: accepted, error: insertError } = await admin
+    const { error: insertError } = await admin
       .from("sync_operations")
-      .upsert(rows, { onConflict: "tenant_id,idempotency_key", ignoreDuplicates: true })
-      .select("idempotency_key, entity_type, entity_id, version");
+      .upsert(rows, { onConflict: "tenant_id,idempotency_key", ignoreDuplicates: true });
     if (insertError) return json({ error: insertError.message }, 500);
 
-    return json({ tenantId: profile.tenant_id, accepted: accepted ?? [] });
+    const keys = rows.map((row) => row.idempotency_key);
+    const { data: stored, error: storedError } = await admin
+      .from("sync_operations")
+      .select("id, idempotency_key")
+      .eq("tenant_id", profile.tenant_id)
+      .in("idempotency_key", keys);
+    if (storedError) return json({ error: storedError.message }, 500);
+
+    const { data: outcomes, error: applyError } = await admin.rpc("apply_sync_operations", {
+      p_operation_ids: (stored ?? []).map((row) => row.id),
+      p_tenant_id: profile.tenant_id,
+      p_actor_user_id: authData.user.id,
+    });
+    if (applyError) return json({ error: applyError.message }, 500);
+
+    const applied = (outcomes ?? []).filter((row) => row.outcome === "APPLIED").map(toResult);
+    const conflicts = (outcomes ?? []).filter((row) => row.outcome === "CONFLICT").map(toResult);
+    const rejected = (outcomes ?? []).filter((row) => row.outcome === "REJECTED").map(toResult);
+    return json({ tenantId: profile.tenant_id, accepted: applied, conflicts, rejected });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 400);
   }
 });
+
+function toResult(row: Record<string, unknown>) {
+  return {
+    idempotencyKey: row.idempotency_key,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    version: row.incoming_version,
+    reason: row.reason ?? null,
+  };
+}
 
 function validateOperation(operation: SyncOperation) {
   if (!operation || typeof operation.idempotencyKey !== "string" || operation.idempotencyKey.length < 16 || operation.idempotencyKey.length > 128) {
@@ -93,9 +120,14 @@ function validateOperation(operation: SyncOperation) {
   }
   if (!allowedOperations.has(operation.operation)) throw new Error("Invalid operation");
   if (!allowedEntities.has(operation.entityType)) throw new Error("Invalid entity type");
-  if (!operation.entityId || operation.entityId.length > 128) throw new Error("Invalid entity id");
+  if (!operation.entityId || operation.entityId.length > 128 || !/^[0-9a-f-]{36}$/i.test(operation.entityId)) throw new Error("Invalid entity id");
   if (!operation.payload || typeof operation.payload !== "object") throw new Error("Invalid payload");
   if (!Number.isSafeInteger(operation.version) || operation.version < 0) throw new Error("Invalid version");
+  if (operation.entityType === "VISIT") {
+    for (const field of ["company_id", "cycle_start_epoch_day", "date_epoch_day"]) {
+      if (!(field in operation.payload)) throw new Error(`Missing visit field: ${field}`);
+    }
+  }
 }
 
 function bearer(value: string | null): string | null {

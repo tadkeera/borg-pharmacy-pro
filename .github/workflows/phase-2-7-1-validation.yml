@@ -97,16 +97,25 @@ jobs:
       - name: Run connected Android tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
+          api-level: 34
           target: google_apis
           arch: x86_64
           profile: pixel_2
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot -wipe-data
           disable-animations: false
+          emulator-boot-timeout: 1200
           script: |
-            adb devices
+            adb devices > adb-devices.log 2>&1
             adb wait-for-device
-            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do sleep 5; done
+            BOOTED=0
+            for i in $(seq 1 240); do
+              BOOT_STATUS="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+              echo "boot-check=$i status=$BOOT_STATUS" | tee -a boot-status.log
+              if [ "$BOOT_STATUS" = "1" ]; then BOOTED=1; break; fi
+              sleep 5
+            done
+            test "$BOOTED" = "1" || { echo "Emulator did not report sys.boot_completed=1"; exit 1; }
+            adb devices >> adb-devices.log 2>&1
             ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
             adb install -r -g app/build/outputs/apk/debug/Rep_Visit_v1.0.0-debug.apk
             adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
@@ -129,6 +138,8 @@ jobs:
         with:
           name: phase-2-7-1-instrumentation-reports
           path: |
+            adb-devices.log
+            boot-status.log
             instrumentation-raw.log
             instrumentation-logcat.log
             dumpsys-package.log

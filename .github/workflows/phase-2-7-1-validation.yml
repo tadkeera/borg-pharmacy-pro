@@ -103,7 +103,14 @@ jobs:
           profile: pixel_2
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot -wipe-data
           disable-animations: false
-          script: ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
+          script: |
+            adb kill-server
+            adb start-server
+            adb wait-for-device
+            until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do sleep 5; done
+            adb shell pm clear com.borgpharmacy.pro.debug || true
+            adb shell mkdir -p /data/local/tmp/phase-2-7-1-test-output
+            ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace -Pandroid.testInstrumentationRunnerArguments.additionalTestOutputDir=/data/local/tmp/phase-2-7-1-test-output
 
       - name: Upload instrumentation reports
         if: always()

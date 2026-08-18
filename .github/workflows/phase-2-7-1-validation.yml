@@ -191,6 +191,7 @@ jobs:
           SQL
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --file supabase/2026_08_phase_2_7_1_security_foundation.sql
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --file supabase/2026_08_phase_2_7_2_sync.sql
 
       - name: Create disposable authenticated tenant fixtures
         env:
@@ -260,6 +261,13 @@ jobs:
             --variable user_a_id="$USER_A_ID" \
             --variable user_b_id="$USER_B_ID" \
             --file supabase/tests/tenant_isolation.sql
+
+      - name: Execute live sync contract test
+        env:
+          PGSSLMODE: require
+        run: |
+          if [ -n "$SUPABASE_DB_URL_POOLER" ]; then PSQL_URL="$SUPABASE_DB_URL_POOLER"; else DB_HOST="$(python3 -c 'from urllib.parse import urlsplit; import sys; print(urlsplit(sys.argv[1]).hostname)' "$SUPABASE_DB_URL")"; DB_IPV4="$(getent ahostsv4 "$DB_HOST" | awk 'NR==1 {print $1}')"; PSQL_URL="${SUPABASE_DB_URL}?hostaddr=${DB_IPV4}"; fi
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --variable user_a_id="$USER_A_ID" --variable user_b_id="$USER_B_ID" --file supabase/tests/sync_contract.sql
 
       - name: Delete disposable fixture users
         if: always()

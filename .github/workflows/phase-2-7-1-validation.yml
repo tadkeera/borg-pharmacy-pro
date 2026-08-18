@@ -107,14 +107,7 @@ jobs:
           script: |
             adb devices > adb-devices.log 2>&1
             adb wait-for-device
-            BOOTED=0
-            for i in $(seq 1 240); do
-              BOOT_STATUS="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
-              echo "boot-check=$i status=$BOOT_STATUS" | tee -a boot-status.log
-              if [ "$BOOT_STATUS" = "1" ]; then BOOTED=1; break; fi
-              sleep 5
-            done
-            test "$BOOTED" = "1" || { echo "Emulator did not report sys.boot_completed=1"; exit 1; }
+            BOOTED=0; for i in $(seq 1 240); do BOOT_STATUS="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"; echo "boot-check=$i status=$BOOT_STATUS" | tee -a boot-status.log; if [ "$BOOT_STATUS" = "1" ]; then BOOTED=1; break; fi; sleep 5; done; test "$BOOTED" = "1" || { echo "Emulator did not report sys.boot_completed=1"; exit 1; }
             adb devices >> adb-devices.log 2>&1
             ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
             adb install -r -g app/build/outputs/apk/debug/Rep_Visit_v1.0.0-debug.apk

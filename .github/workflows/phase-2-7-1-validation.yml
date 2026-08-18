@@ -111,8 +111,17 @@ jobs:
             adb install -r -g app/build/outputs/apk/debug/Rep_Visit_v1.0.0-debug.apk
             adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell pm clear com.borgpharmacy.pro.debug || true
-            adb shell am instrument -w -r com.borgpharmacy.pro.debug.test/androidx.test.runner.AndroidJUnitRunner | tee instrumentation-raw.log
-            grep -q "RoomMigrationTest" instrumentation-raw.log
+            adb logcat -c
+            set +e
+            adb shell am instrument -w -r com.borgpharmacy.pro.debug.test/androidx.test.runner.AndroidJUnitRunner > instrumentation-raw.log 2>&1
+            INSTRUMENTATION_EXIT=$?
+            adb logcat -d > instrumentation-logcat.log
+            adb shell dumpsys package com.borgpharmacy.pro.debug.test > dumpsys-package.log 2>&1
+            adb shell dumpsys activity processes > dumpsys-processes.log 2>&1
+            adb shell pm list packages | grep borg > packages-borg.log 2>&1
+            grep -nE "FATAL EXCEPTION|AndroidRuntime|Process com.borgpharmacy.pro.debug.test|Process androidx.test.runner|SecurityException|ClassNotFoundException|NoClassDefFoundError|UnsatisfiedLinkError|IllegalStateException" instrumentation-logcat.log instrumentation-raw.log > crash-signatures.log || true
+            cat instrumentation-raw.log
+            exit "$INSTRUMENTATION_EXIT"
 
       - name: Upload instrumentation reports
         if: always()
@@ -121,6 +130,11 @@ jobs:
           name: phase-2-7-1-instrumentation-reports
           path: |
             instrumentation-raw.log
+            instrumentation-logcat.log
+            dumpsys-package.log
+            dumpsys-processes.log
+            packages-borg.log
+            crash-signatures.log
             **/build/reports/androidTests/**
             **/build/outputs/androidTest-results/**
             **/build/outputs/connected_android_test_additional_output/**

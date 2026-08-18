@@ -108,10 +108,13 @@ jobs:
             adb devices > adb-devices.log 2>&1
             adb wait-for-device
             BOOTED=0; for i in $(seq 1 240); do BOOT_STATUS="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"; echo "boot-check=$i status=$BOOT_STATUS" | tee -a boot-status.log; if [ "$BOOT_STATUS" = "1" ]; then BOOTED=1; break; fi; sleep 5; done; test "$BOOTED" = "1" || { echo "Emulator did not report sys.boot_completed=1"; exit 1; }
-            adb devices >> adb-devices.log 2>&1
+            adb reconnect || true
+            adb wait-for-device
+            adb devices | tee -a adb-devices.log
+            adb devices | grep -Eq '^emulator-5554[[:space:]]+device$' || { echo "emulator-5554 is not online"; exit 1; }
             ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
-            adb install -r -g app/build/outputs/apk/debug/Rep_Visit_v1.0.0-debug.apk
-            adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            INSTALL_OK=0; for i in 1 2 3; do adb reconnect || true; adb wait-for-device; adb devices | tee -a adb-devices.log; adb install -r -g app/build/outputs/apk/debug/Rep_Visit_v1.0.0-debug.apk && INSTALL_OK=1 && break; sleep 15; done; test "$INSTALL_OK" = "1" || { echo "Debug APK installation failed after 3 attempts"; exit 1; }
+            TEST_INSTALL_OK=0; for i in 1 2 3; do adb reconnect || true; adb wait-for-device; adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk && TEST_INSTALL_OK=1 && break; sleep 15; done; test "$TEST_INSTALL_OK" = "1" || { echo "AndroidTest APK installation failed after 3 attempts"; exit 1; }
             adb shell pm clear com.borgpharmacy.pro.debug || true
             adb logcat -c
             adb shell am instrument -w -r com.borgpharmacy.pro.debug.test/androidx.test.runner.AndroidJUnitRunner > instrumentation-raw.log 2>&1; INSTRUMENTATION_EXIT=$?; adb logcat -d > instrumentation-logcat.log; adb shell dumpsys package com.borgpharmacy.pro.debug.test > dumpsys-package.log 2>&1; adb shell dumpsys activity processes > dumpsys-processes.log 2>&1; adb shell pm list packages | grep borg > packages-borg.log 2>&1; grep -nE "FATAL EXCEPTION|AndroidRuntime|Process com.borgpharmacy.pro.debug.test|Process androidx.test.runner|SecurityException|ClassNotFoundException|NoClassDefFoundError|UnsatisfiedLinkError|IllegalStateException" instrumentation-logcat.log instrumentation-raw.log > crash-signatures.log || true; cat instrumentation-raw.log; exit "$INSTRUMENTATION_EXIT"

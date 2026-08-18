@@ -6,7 +6,7 @@ create table if not exists public.sync_operations (
   operation_id uuid primary key,
   tenant_id uuid not null references public.tenants(id) on delete cascade,
   idempotency_key text not null,
-  entity_type text not null check (entity_type in ('COMPANY','REPRESENTATIVE','VISIT')),
+  entity_type text not null check (entity_type in ('COMPANY','REPRESENTATIVE','VISIT','FACILITY_PROFILE','PRINT_LOG')),
   entity_id uuid not null,
   operation text not null check (operation in ('CREATE','UPDATE','DELETE')),
   local_version bigint not null,
@@ -24,9 +24,15 @@ create table if not exists public.sync_changes (
   deleted boolean not null default false,
   created_at timestamptz not null default now()
 );
+create table if not exists public.facility_profiles (id uuid primary key, tenant_id uuid not null references public.tenants(id) on delete cascade, arabic_name text not null default '', english_name text not null default '', logo_path text, policy integer not null default 1, updated_at bigint not null default 0, is_deleted boolean not null default false);
+create table if not exists public.print_logs (id uuid primary key, tenant_id uuid not null references public.tenants(id) on delete cascade, visit_id uuid not null, printed_at bigint not null, is_deleted boolean not null default false);
 create index if not exists idx_sync_changes_tenant_sequence on public.sync_changes(tenant_id,sequence_id);
 alter table public.sync_operations enable row level security;
 alter table public.sync_changes enable row level security;
+alter table public.facility_profiles enable row level security;
+alter table public.print_logs enable row level security;
+create policy facility_profiles_sync_tenant on public.facility_profiles for all to authenticated using (tenant_id=public.current_tenant_id()) with check (tenant_id=public.current_tenant_id());
+create policy print_logs_sync_tenant on public.print_logs for all to authenticated using (tenant_id=public.current_tenant_id()) with check (tenant_id=public.current_tenant_id());
 drop policy if exists sync_operations_tenant on public.sync_operations;
 create policy sync_operations_tenant on public.sync_operations for select to authenticated using (tenant_id=public.current_tenant_id());
 drop policy if exists sync_changes_tenant on public.sync_changes;
@@ -58,6 +64,12 @@ begin
  elsif et='VISIT' then
    if p_operation->>'operation'='DELETE' then update visits set deleted_at=extract(epoch from now())*1000,updated_at=extract(epoch from now())*1000 where id=eid and tenant_id=t;
    else insert into visits(id,tenant_id,company_id,cycle_start_epoch_day,day_of_cycle,week_of_cycle,date_epoch_day,shift,slot_index,status,created_at,updated_at,deleted_at) values(eid,t,(payload->>'company_id')::uuid,(payload->>'cycle_start_epoch_day')::bigint,(payload->>'day_of_cycle')::int,(payload->>'week_of_cycle')::int,(payload->>'date_epoch_day')::bigint,payload->>'shift',(payload->>'slot_index')::int,coalesce(payload->>'status','SCHEDULED'),coalesce((payload->>'created_at')::bigint,extract(epoch from now())*1000),extract(epoch from now())*1000,null) on conflict(id) do update set status=excluded.status,shift=excluded.shift,date_epoch_day=excluded.date_epoch_day,updated_at=excluded.updated_at where visits.tenant_id=t; end if;
+ elsif et='FACILITY_PROFILE' then
+   insert into public.facility_profiles(id,tenant_id,arabic_name,english_name,logo_path,policy,updated_at,is_deleted) values(eid,t,coalesce(payload->>'arabic_name',''),coalesce(payload->>'english_name',''),nullif(payload->>'logo_path',''),coalesce((payload->>'policy')::int,1),extract(epoch from now())*1000,false) on conflict(id) do update set arabic_name=excluded.arabic_name,english_name=excluded.english_name,logo_path=excluded.logo_path,policy=excluded.policy,updated_at=excluded.updated_at,is_deleted=excluded.is_deleted where facility_profiles.tenant_id=t;
+   insert into public.sync_changes(tenant_id,entity_type,entity_id,server_version,payload,deleted) values(t,et,eid,extract(epoch from now())::bigint,payload,false);
+ elsif et='PRINT_LOG' then
+   insert into public.print_logs(id,tenant_id,visit_id,printed_at,is_deleted) values(eid,t,(payload->>'visit_id')::uuid,coalesce((payload->>'printed_at')::bigint,extract(epoch from now())*1000),false) on conflict(id) do nothing;
+   insert into public.sync_changes(tenant_id,entity_type,entity_id,server_version,payload,deleted) values(t,et,eid,extract(epoch from now())::bigint,payload,false);
  end if;
  return jsonb_build_object('accepted',true,'duplicate',false,'server_version',extract(epoch from now())::bigint);
 end;

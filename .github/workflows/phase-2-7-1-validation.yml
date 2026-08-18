@@ -54,7 +54,7 @@ jobs:
         run: ./gradlew test --no-daemon --stacktrace
 
       - name: Run Phase 2.7.2 acceptance tests
-        run: ./gradlew test --tests com.borgpharmacy.pro.sync.Phase272AcceptanceTest --no-daemon --stacktrace
+        run: ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.sync.Phase272AcceptanceTest --no-daemon --stacktrace
 
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace

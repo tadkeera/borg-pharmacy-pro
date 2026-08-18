@@ -104,11 +104,16 @@ jobs:
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot -wipe-data
           disable-animations: false
           script: |
+            set -o pipefail
             adb devices
             adb wait-for-device
             until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do sleep 5; done
+            ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon --stacktrace
+            adb install -r -g app/build/outputs/apk/debug/Rep_Visit_v1.0.0-debug.apk
+            adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell pm clear com.borgpharmacy.pro.debug || true
-            ./gradlew connectedDebugAndroidTest --no-daemon --stacktrace
+            adb shell am instrument -w -r com.borgpharmacy.pro.debug.test/androidx.test.runner.AndroidJUnitRunner | tee instrumentation-raw.log
+            grep -q "RoomMigrationTest" instrumentation-raw.log
 
       - name: Upload instrumentation reports
         if: always()
@@ -116,6 +121,7 @@ jobs:
         with:
           name: phase-2-7-1-instrumentation-reports
           path: |
+            instrumentation-raw.log
             **/build/reports/androidTests/**
             **/build/outputs/androidTest-results/**
             **/build/outputs/connected_android_test_additional_output/**

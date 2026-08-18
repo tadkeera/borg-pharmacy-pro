@@ -16,7 +16,7 @@ select public.sync_push(jsonb_build_object('operation_id','20000000-0000-0000-00
 do $$ declare n int; c bigint; begin
  select count(*) into n from public.sync_pull(0,100); if n < 3 then raise exception 'sync_pull returned fewer than 3 changes'; end if;
  select max(sequence_id) into c from public.sync_pull(0,2); if c is null then raise exception 'cursor page missing sequence'; end if;
- if (select count(*) from public.sync_pull(c,100)) <> 0 then raise exception 'cursor did not advance'; end if;
+ if (select count(*) from public.sync_pull(c,100)) < 1 then raise exception 'cursor did not advance to the next page'; end if;
 end $$;
 select set_config('request.jwt.claim.sub',:'user_b_id',true);
 do $$ begin if (select count(*) from public.sync_pull(0,100)) <> 0 then raise exception 'Tenant B can read Tenant A changes'; end if; end $$;

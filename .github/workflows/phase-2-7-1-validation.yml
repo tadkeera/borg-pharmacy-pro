@@ -197,7 +197,12 @@ jobs:
           SQL
           psql "$PSQL_URL" --set ON_ERROR_STOP=1 \
             --file supabase/2026_08_phase_2_7_1_security_foundation.sql
-          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --file supabase/2026_08_phase_2_7_2_sync.sql
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 --file supabase/2026_08_phase_2_7_2_bootstrap.sql
+          psql "$PSQL_URL" --set ON_ERROR_STOP=1 <<'SQL'
+          select public.sync_push_test('FACILITY_PROFILE');
+          select public.sync_push_test('PRINT_LOG');
+          select required_version from public.sync_schema_version where required_version='2.7.2';
+          SQL
 
       - name: Create disposable authenticated tenant fixtures
         env:

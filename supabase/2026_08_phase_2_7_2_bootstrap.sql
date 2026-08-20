@@ -7,6 +7,8 @@ create table if not exists public.sync_operations(operation_id uuid primary key,
 create table if not exists public.sync_changes(sequence_id bigint generated always as identity primary key,tenant_id uuid not null,entity_type text not null,entity_id uuid not null,server_version bigint not null,payload jsonb not null,deleted boolean not null default false,created_at timestamptz not null default now());
 create table if not exists public.facility_profiles(id uuid primary key,tenant_id uuid not null,arabic_name text not null default '',english_name text not null default '',logo_path text,policy integer not null default 1,updated_at bigint not null default 0,is_deleted boolean not null default false);
 create table if not exists public.print_logs(id uuid primary key,tenant_id uuid not null,visit_id uuid not null,printed_at bigint not null,is_deleted boolean not null default false);
+alter table public.sync_operations drop constraint if exists sync_operations_entity_type_check;
+alter table public.sync_operations add constraint sync_operations_entity_type_check check(entity_type in ('COMPANY','REPRESENTATIVE','VISIT','FACILITY_PROFILE','PRINT_LOG'));
 create unique index if not exists idx_sync_ops_tenant_idem on public.sync_operations(tenant_id,idempotency_key);
 create index if not exists idx_sync_changes_tenant_cursor on public.sync_changes(tenant_id,sequence_id);
 create index if not exists idx_facility_profiles_tenant on public.facility_profiles(tenant_id);

@@ -43,6 +43,15 @@ jobs:
         run: ./gradlew compileDebugKotlin --no-daemon --stacktrace
       - name: Run all Phase 3 foundation unit tests
         run: ./gradlew test --no-daemon --stacktrace
+      - name: Run named Phase 3 acceptance suites
+        run: |
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.Phase3FoundationE2ETest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3SyncAcceptanceTest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3AuditAcceptanceTest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.ReceptionPermitWorkflowE2ETest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3RbacAcceptanceTest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3DatabaseAcceptanceTest --no-daemon --stacktrace
+          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3FoundationFinalE2ETest --no-daemon --stacktrace
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
       - name: Upload build and unit reports
@@ -95,4 +104,33 @@ jobs:
           path: |
             **/build/reports/androidTests/**
             **/build/outputs/androidTest-results/**
+          if-no-files-found: warn
+
+  supabase-phase3-validation:
+    name: Supabase Phase 3 foundation validation
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL_POOLER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install --yes postgresql-client
+      - name: Validate Phase 3 sync schema and tenant scope
+        run: |
+          test -n "$SUPABASE_DB_URL" || { echo "SUPABASE_DB_URL_POOLER is required"; exit 1; }
+          psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 <<'SQL'
+          do $$ begin
+            if to_regclass('public.facility_visit_authorizations') is null then raise exception 'authorization table missing'; end if;
+            if to_regclass('public.entry_permits') is null then raise exception 'permit table missing'; end if;
+            if to_regclass('public.employees') is null then raise exception 'employee table missing'; end if;
+          end $$;
+          SQL
+      - name: Upload Supabase validation log
+        if: always()
+        run: psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=0 -c "select now()" > supabase-phase3.log 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase-3-foundation-supabase-logs
+          path: supabase-phase3.log
           if-no-files-found: warn

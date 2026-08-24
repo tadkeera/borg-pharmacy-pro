@@ -43,15 +43,17 @@ jobs:
         run: ./gradlew compileDebugKotlin --no-daemon --stacktrace
       - name: Run all Phase 3 foundation unit tests
         run: ./gradlew test --no-daemon --stacktrace
-      - name: Run named Phase 3 acceptance suites
+      - name: Verify canonical Phase 3 foundation test manifest
         run: |
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3FoundationE2ETest --no-daemon --stacktrace
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3SyncAcceptanceTest --no-daemon --stacktrace
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3AuditAcceptanceTest --no-daemon --stacktrace
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.ReceptionPermitWorkflowE2ETest --no-daemon --stacktrace
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3RbacAcceptanceTest --no-daemon --stacktrace
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3DatabaseAcceptanceTest --no-daemon --stacktrace
-          ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3FoundationFinalE2ETest --no-daemon --stacktrace
+          git rev-parse HEAD
+          git branch --show-current
+          test -f app/src/test/java/com/borgpharmacy/pro/phase3/Phase3FoundationE2ETest.kt
+          find app/src/test/java/com/borgpharmacy/pro/phase3 -type f -print
+          grep -R "package com.borgpharmacy.pro.phase3" app/src/test/java || true
+          grep -R "class Phase3" app/src/test/java || true
+          git ls-files "app/src/test/java/com/borgpharmacy/pro/phase3/*"
+      - name: Run canonical Phase 3 foundation acceptance test
+        run: ./gradlew :app:testDebugUnitTest --tests com.borgpharmacy.pro.phase3.Phase3FoundationE2ETest --info --stacktrace --no-daemon
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
       - name: Upload build and unit reports
@@ -115,12 +117,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install --yes postgresql-client
-      - name: Apply Phase 3 foundation schema
+      - name: Apply Phase 3 foundation migration
         run: |
           test -n "$SUPABASE_DB_URL" || { echo "SUPABASE_DB_URL_POOLER is required"; exit 1; }
           psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 --file supabase/2026_08_phase_3_0_foundation.sql
-      - name: Apply Phase 3 foundation migration
-        run: psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 --file supabase/2026_08_phase_3_0_foundation.sql
       - name: Validate Phase 3 sync schema and tenant scope
         run: |
           psql "$SUPABASE_DB_URL" --set ON_ERROR_STOP=1 <<'SQL'

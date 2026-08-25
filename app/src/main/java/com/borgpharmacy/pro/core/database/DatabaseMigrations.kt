@@ -3,50 +3,26 @@ package com.borgpharmacy.pro.core.database
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-/**
- * Non-destructive schema migration for devices that already have version 1.
- * Existing rows retain their business data; new synchronization metadata starts at safe defaults.
- */
 val MIGRATION_1_2 = object : Migration(1, 2) {
-    override fun migrate(database: SupportSQLiteDatabase) {
-        database.execSQL("ALTER TABLE facility_profiles ADD COLUMN syncVersion INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE companies ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE companies ADD COLUMN syncVersion INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE representatives ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE representatives ADD COLUMN syncVersion INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE visits ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE visits ADD COLUMN syncVersion INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE users ADD COLUMN updatedAt INTEGER NOT NULL DEFAULT 0")
-        database.execSQL("ALTER TABLE users ADD COLUMN syncVersion INTEGER NOT NULL DEFAULT 0")
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_companies_tenantId_name ON companies(tenantId, name)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_representatives_tenantId_companyId ON representatives(tenantId, companyId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_visits_tenantId_cycleStart_date ON visits(tenantId, cycleStart, date)")
+    }
+}
 
-        database.execSQL(
-            """
-            CREATE TABLE IF NOT EXISTS sync_queue (
-                id TEXT NOT NULL PRIMARY KEY,
-                tenantId TEXT NOT NULL,
-                entityType TEXT NOT NULL,
-                entityId TEXT NOT NULL,
-                operation TEXT NOT NULL,
-                payload TEXT NOT NULL,
-                version INTEGER NOT NULL,
-                idempotencyKey TEXT NOT NULL,
-                status TEXT NOT NULL,
-                attempts INTEGER NOT NULL,
-                nextAttemptAt INTEGER NOT NULL,
-                createdAt INTEGER NOT NULL,
-                lastError TEXT
-            )
-            """.trimIndent(),
-        )
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_sync_queue_tenantId_nextAttemptAt ON sync_queue(tenantId, nextAttemptAt)")
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_sync_queue_tenantId_status_createdAt ON sync_queue(tenantId, status, createdAt)")
-        database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_sync_queue_tenantId_idempotencyKey ON sync_queue(tenantId, idempotencyKey)")
+val MIGRATION_3_4 = object : Migration(3, 4) { override fun migrate(db: SupportSQLiteDatabase) { db.execSQL("CREATE TABLE IF NOT EXISTS sync_metadata (tenantId TEXT NOT NULL PRIMARY KEY, lastSuccessfulCursor INTEGER NOT NULL, lastSyncAt INTEGER)") } }
 
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_companies_tenantId_updatedAt ON companies(tenantId, updatedAt)")
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_representatives_tenantId_companyId ON representatives(tenantId, companyId)")
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_representatives_tenantId_updatedAt ON representatives(tenantId, updatedAt)")
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_visits_tenantId_date_shift_slotIndex ON visits(tenantId, date, shift, slotIndex)")
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_visits_tenantId_updatedAt ON visits(tenantId, updatedAt)")
-        database.execSQL("CREATE INDEX IF NOT EXISTS index_users_tenantId_updatedAt ON users(tenantId, updatedAt)")
+val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS sync_outbox (operationId TEXT NOT NULL PRIMARY KEY, tenantId TEXT NOT NULL, entityType TEXT NOT NULL, entityId TEXT NOT NULL, operation TEXT NOT NULL, payload TEXT NOT NULL, idempotencyKey TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, nextAttemptAt INTEGER NOT NULL, lastError TEXT, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_sync_outbox_tenantId_idempotencyKey ON sync_outbox(tenantId, idempotencyKey)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_sync_outbox_tenantId_state_nextAttemptAt ON sync_outbox(tenantId, state, nextAttemptAt)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS sync_conflicts (conflictId TEXT NOT NULL PRIMARY KEY, tenantId TEXT NOT NULL, operationId TEXT NOT NULL, entityType TEXT NOT NULL, entityId TEXT NOT NULL, localVersion INTEGER NOT NULL, serverVersion INTEGER NOT NULL, localPayload TEXT NOT NULL, serverPayload TEXT NOT NULL, resolutionStatus TEXT NOT NULL, createdAt INTEGER NOT NULL, resolvedAt INTEGER)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_sync_conflicts_tenantId_operationId ON sync_conflicts(tenantId, operationId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_sync_conflicts_tenantId ON sync_conflicts(tenantId)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS sync_logs (id TEXT NOT NULL PRIMARY KEY, tenantId TEXT NOT NULL, startedAt INTEGER NOT NULL, finishedAt INTEGER, pushed INTEGER NOT NULL, pulled INTEGER NOT NULL, conflicts INTEGER NOT NULL, error TEXT)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_sync_logs_tenantId ON sync_logs(tenantId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_sync_logs_startedAt ON sync_logs(startedAt)")
     }
 }

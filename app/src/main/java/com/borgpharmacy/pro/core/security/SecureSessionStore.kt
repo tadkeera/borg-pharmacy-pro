@@ -4,67 +4,27 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 
-/** Stores only authentication session material; business data remains in Room. */
-interface SessionStore {
-    fun save(session: SessionSnapshot)
-    fun read(): SessionSnapshot?
-    fun clear()
-}
-
-class SecureSessionStore(context: Context) : SessionStore {
+/** Stores only Supabase session material encrypted by an Android Keystore master key. */
+class SecureSessionStore(context: Context) {
+    private val masterKey = MasterKey.Builder(context.applicationContext)
+        .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+        .build()
     private val preferences = EncryptedSharedPreferences.create(
-        context,
-        FILE_NAME,
-        MasterKey.Builder(context)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build(),
+        context.applicationContext,
+        "supabase_secure_session",
+        masterKey,
         EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
     )
-
-    override fun save(session: SessionSnapshot) {
-        preferences.edit()
-            .putString(KEY_ACCESS_TOKEN, session.accessToken)
-            .putString(KEY_REFRESH_TOKEN, session.refreshToken)
-            .putString(KEY_USER_ID, session.userId)
-            .putString(KEY_TENANT_ID, session.tenantId)
-            .putLong(KEY_EXPIRES_AT, session.expiresAtEpochSeconds)
-            .apply()
+    fun save(accessToken: String, refreshToken: String, expiresIn: Long, tokenType: String) = preferences.edit()
+        .putString(KEY_ACCESS, accessToken).putString(KEY_REFRESH, refreshToken)
+        .putLong(KEY_EXPIRES, expiresIn).putString(KEY_TYPE, tokenType).apply()
+    fun read(): StoredSession? {
+        val access = preferences.getString(KEY_ACCESS, null) ?: return null
+        val refresh = preferences.getString(KEY_REFRESH, null) ?: return null
+        return StoredSession(access, refresh, preferences.getLong(KEY_EXPIRES, 0L), preferences.getString(KEY_TYPE, "Bearer") ?: "Bearer")
     }
-
-    override fun read(): SessionSnapshot? {
-        val access = preferences.getString(KEY_ACCESS_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return null
-        val refresh = preferences.getString(KEY_REFRESH_TOKEN, null)?.takeIf { it.isNotBlank() } ?: return null
-        val userId = preferences.getString(KEY_USER_ID, null)?.takeIf { it.isNotBlank() } ?: return null
-        val tenantId = preferences.getString(KEY_TENANT_ID, null)?.takeIf { it.isNotBlank() } ?: return null
-        return SessionSnapshot(
-            accessToken = access,
-            refreshToken = refresh,
-            userId = userId,
-            tenantId = tenantId,
-            expiresAtEpochSeconds = preferences.getLong(KEY_EXPIRES_AT, 0L),
-        )
-    }
-
-    override fun clear() = preferences.edit().clear().apply()
-
-    companion object {
-        private const val FILE_NAME = "borg_secure_session"
-        private const val KEY_ACCESS_TOKEN = "access_token"
-        private const val KEY_REFRESH_TOKEN = "refresh_token"
-        private const val KEY_USER_ID = "user_id"
-        private const val KEY_TENANT_ID = "tenant_id"
-        private const val KEY_EXPIRES_AT = "expires_at_epoch_seconds"
-    }
-}
-
-data class SessionSnapshot(
-    val accessToken: String,
-    val refreshToken: String,
-    val userId: String,
-    val tenantId: String,
-    val expiresAtEpochSeconds: Long,
-) {
-    fun isExpired(nowEpochSeconds: Long = System.currentTimeMillis() / 1000): Boolean =
-        expiresAtEpochSeconds <= nowEpochSeconds + 60
+    fun clear() = preferences.edit().clear().apply()
+    data class StoredSession(val accessToken: String, val refreshToken: String, val expiresIn: Long, val tokenType: String)
+    private companion object { const val KEY_ACCESS="access_token"; const val KEY_REFRESH="refresh_token"; const val KEY_EXPIRES="expires_in"; const val KEY_TYPE="token_type" }
 }

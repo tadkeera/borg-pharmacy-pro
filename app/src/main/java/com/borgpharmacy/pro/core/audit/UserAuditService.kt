@@ -1,0 +1,2 @@
+package com.borgpharmacy.pro.core.audit
+class UserAuditService(private val audit:AuditLogRepository){suspend fun created(t:String,a:String,r:String,id:String,m:String="")=audit.userCreated(t,a,r,id,m);suspend fun updated(t:String,a:String,r:String,id:String,m:String="")=audit.userUpdated(t,a,r,id,m);suspend fun passwordChanged(t:String,a:String,r:String,id:String)=audit.passwordChanged(t,a,r,id);suspend fun roleChanged(t:String,a:String,r:String,id:String,m:String)=audit.roleChanged(t,a,r,id,m)}
